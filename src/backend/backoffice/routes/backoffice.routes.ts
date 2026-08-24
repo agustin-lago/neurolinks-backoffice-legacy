@@ -2265,7 +2265,8 @@ export const registerBackofficeRoutes = (app: any) => {
         const chatId = String(req.body?.chatId || '').trim();
         const scope = resolveOperationalScope(req);
         if (!scope.success) {
-            return res.status(scope.status).json({ success: false, error: scope.error });
+            const failedScope = scope as { success: false; status: number; error: string };
+            return res.status(failedScope.status).json({ success: false, error: failedScope.error });
         }
         const { projectId, serviceId } = scope;
 
