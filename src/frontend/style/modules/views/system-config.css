@@ -1,0 +1,399 @@
+@layer utilities {
+  /* Variables grid (system-config) */
+  .variables-grid {
+    @apply grid gap-5 mt-5;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  }
+
+  .variable-group {
+    @apply glass p-4 flex flex-col gap-1.5;
+  }
+
+  .variable-group h3 {
+    @apply text-xs font-heading font-bold uppercase tracking-wider text-accent-bright;
+  }
+
+  .variable-group .description {
+    @apply text-xs text-secondary-content leading-relaxed;
+  }
+
+  .variable-group input,
+  .variable-group textarea,
+  .variable-group select {
+    @apply input-field;
+    font-size: .50rem;
+    line-height: 1rem;
+  }
+
+  .variable-group textarea {
+    resize: none;
+    min-height: 60px;
+  }
+
+  .variable-group select option {
+    @apply bg-navy-800 text-white;
+  }
+
+  .variable-group-span2 {
+    grid-column: span 2;
+  }
+
+  .project-identity-grid {
+    @apply mt-0 mb-7;
+  }
+
+  .project-identity-value {
+    @apply rounded-xl px-4 py-3 text-sm font-semibold text-primary-content;
+    background: rgba(0, 153, 255, 0.06);
+    border: 1px solid rgba(0, 153, 255, 0.16);
+  }
+
+  [data-theme="light"] .project-identity-value {
+    background: rgba(37, 99, 235, 0.05);
+    border-color: rgba(37, 99, 235, 0.16);
+  }
+
+  .project-identity-id {
+    @apply font-mono text-xs;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Section header */
+  .section-header {
+    @apply col-span-full mt-8 pb-3 mb-1;
+    border-bottom: 1px solid rgba(0, 153, 255, 0.12);
+  }
+
+  [data-theme="light"] .section-header {
+    border-bottom-color: rgba(37, 99, 235, 0.12);
+  }
+
+  .section-header h2 {
+    @apply text-base font-heading font-bold text-accent-bright flex items-center gap-2;
+  }
+
+  /* Trigger card (prompt editor access) */
+  .trigger-card {
+    @apply flex items-center justify-between p-5 rounded-2xl cursor-pointer transition-all duration-300 hover:-translate-y-0.5;
+    background: rgba(0, 153, 255, 0.05);
+    border: 1px dashed rgba(0, 153, 255, 0.3);
+  }
+
+  .trigger-card:hover {
+    background: rgba(0, 153, 255, 0.1);
+  }
+
+  [data-theme="light"] .trigger-card {
+    background: rgba(37, 99, 235, 0.04);
+    border-color: rgba(37, 99, 235, 0.25);
+  }
+
+  .trigger-card-title {
+    @apply m-0 text-sm font-heading font-bold text-accent-bright flex items-center gap-2;
+  }
+
+  /* Auth overlay */
+  #config-auth-overlay {
+    @apply fixed inset-0 flex items-center justify-center;
+    background: rgba(7, 24, 40, 0.92);
+    backdrop-filter: blur(16px);
+    z-index: 9999;
+  }
+
+  .auth-card {
+    @apply glass-strong w-full max-w-sm mx-4 p-10 text-center animate-pop-in;
+  }
+
+  .auth-icon {
+    @apply text-5xl text-accent-bright block mb-5;
+  }
+
+  .auth-input {
+    @apply input-field text-center text-base my-5;
+  }
+
+  .auth-card h2 {
+    @apply text-lg font-heading font-bold text-primary-content;
+  }
+
+  .auth-card p {
+    @apply text-sm text-secondary-content mt-2;
+  }
+
+  /* Main config content (JS lo muestra tras auth) */
+  #main-config-content {
+    display: none;
+    @apply w-full min-h-screen flex-row;
+    opacity: 0;
+    transition: opacity 0.5s ease;
+  }
+
+  /* Panel overlay */
+  .panel-overlay {
+    @apply fixed inset-0 pointer-events-none;
+    background: rgba(7, 24, 40, 0.6);
+    backdrop-filter: blur(4px);
+    z-index: 1999;
+    display: none;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+  }
+
+  .panel-overlay.active {
+    display: block;
+    opacity: 1;
+    @apply pointer-events-auto cursor-pointer;
+  }
+
+  /* â”€â”€ Prompt panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+  .prompt-panel {
+    @apply fixed top-0 h-full flex flex-col;
+    right: -80%;
+    width: 80%;
+    z-index: 2000;
+    background: rgba(15, 42, 68, 0.98);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    border-left: 1px solid rgba(0, 153, 255, 0.12);
+    box-shadow: -20px 0 60px rgba(0, 0, 0, 0.5);
+    transition: right 0.4s cubic-bezier(0.19, 1, 0.22, 1);
+  }
+
+  [data-theme="light"] .prompt-panel {
+    background: rgba(248, 250, 252, 0.98);
+    border-left-color: rgba(37, 99, 235, 0.1);
+    box-shadow: -20px 0 60px rgba(0, 0, 0, 0.15);
+  }
+
+  .prompt-panel.active {
+    right: 0;
+  }
+
+  /* Header */
+  .prompt-panel-header {
+    @apply flex items-center justify-between gap-4 px-6 py-5 flex-shrink-0;
+    border-bottom: 1px solid rgba(0, 153, 255, 0.1);
+    background: rgba(255, 255, 255, 0.02);
+  }
+
+  [data-theme="light"] .prompt-panel-header {
+    border-bottom-color: rgba(37, 99, 235, 0.08);
+    background: rgba(0, 0, 0, 0.02);
+  }
+
+  .prompt-panel-title-group {
+    @apply flex-1 min-w-0;
+  }
+
+  .prompt-panel-title {
+    @apply text-base font-heading font-bold text-primary-content flex items-center gap-2 mb-0.5;
+  }
+
+  .prompt-panel-title-icon {
+    @apply text-accent-bright;
+  }
+
+  .prompt-panel-subtitle {
+    @apply text-xs text-secondary-content;
+  }
+
+  .prompt-close-btn {
+    @apply flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-lg bg-transparent border-0 cursor-pointer transition-all duration-150;
+    color: rgba(255, 255, 255, 0.4);
+  }
+
+  .prompt-close-btn:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: white;
+  }
+
+  [data-theme="light"] .prompt-close-btn {
+    color: rgba(0, 0, 0, 0.4);
+  }
+
+  [data-theme="light"] .prompt-close-btn:hover {
+    background: rgba(0, 0, 0, 0.06);
+    color: #1e293b;
+  }
+
+  /* Assistant tabs */
+  .prompt-assistant-tabs {
+    @apply flex gap-1 px-4 py-3 flex-shrink-0 overflow-x-auto;
+    border-bottom: 1px solid rgba(0, 153, 255, 0.08);
+    background: rgba(255, 255, 255, 0.01);
+    scrollbar-width: none;
+  }
+
+  .prompt-assistant-tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  [data-theme="light"] .prompt-assistant-tabs {
+    border-bottom-color: rgba(37, 99, 235, 0.07);
+    background: rgba(0, 0, 0, 0.01);
+  }
+
+  .prompt-tab {
+    @apply flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-heading font-semibold cursor-pointer flex-shrink-0 transition-all duration-150 border-0;
+    background: transparent;
+    color: rgba(255, 255, 255, 0.45);
+  }
+
+  .prompt-tab:hover {
+    background: rgba(0, 153, 255, 0.08);
+    color: rgba(255, 255, 255, 0.75);
+  }
+
+  .prompt-tab.active {
+    background: rgba(0, 153, 255, 0.15);
+    color: #0099FF;
+    border: 1px solid rgba(0, 153, 255, 0.25);
+  }
+
+  [data-theme="light"] .prompt-tab {
+    color: rgba(0, 0, 0, 0.4);
+  }
+
+  [data-theme="light"] .prompt-tab:hover {
+    background: rgba(37, 99, 235, 0.06);
+    color: #1d4ed8;
+  }
+
+  [data-theme="light"] .prompt-tab.active {
+    background: rgba(37, 99, 235, 0.1);
+    color: #2563eb;
+    border-color: rgba(37, 99, 235, 0.25);
+  }
+
+  /* Content */
+  .prompt-panel-content {
+    @apply flex-1 overflow-y-auto p-5 flex flex-col;
+    min-height: 0;
+  }
+
+  .prompt-panel-content .CodeMirror {
+    @apply flex-1 rounded-xl text-sm;
+    height: 100%;
+    min-height: 300px;
+    border: 1px solid rgba(0, 153, 255, 0.1);
+    background: rgba(255, 255, 255, 0.03);
+  }
+
+  [data-theme="light"] .prompt-panel-content .CodeMirror {
+    border: 1px solid rgba(255, 255, 255, 0.13);
+  }
+
+  /* Footer */
+  .prompt-panel-footer {
+    @apply flex items-center justify-between px-5 py-4 flex-shrink-0 gap-3;
+    border-top: 1px solid rgba(0, 153, 255, 0.08);
+    background: rgba(255, 255, 255, 0.02);
+  }
+
+  [data-theme="light"] .prompt-panel-footer {
+    border-top-color: rgba(37, 99, 235, 0.08);
+    background: rgba(0, 0, 0, 0.02);
+  }
+
+  .prompt-footer-actions {
+    @apply flex gap-2;
+  }
+
+  .prompt-sync-status {
+    @apply text-xs font-heading font-semibold text-accent-bright flex items-center gap-1.5;
+    min-width: 0;
+  }
+
+  /* Form actions bar */
+  .actions {
+    @apply flex justify-end gap-3 mt-8 pt-5;
+    border-top: 1px solid rgba(0, 153, 255, 0.1);
+  }
+
+  [data-theme="light"] .actions {
+    border-top-color: rgba(37, 99, 235, 0.1);
+  }
+
+  /* Number stepper */
+  .number-stepper {
+    @apply flex items-center rounded-xl;
+    border: 1px solid rgba(0, 153, 255, 0.1);
+    background: rgba(255, 255, 255, 0.05);
+    width: fit-content;
+    overflow: hidden;
+  }
+
+  .number-stepper:focus-within {
+    border-color: rgba(0, 153, 255, 0.35);
+    background: rgba(255, 255, 255, 0.08);
+    box-shadow: 0 0 0 3px rgba(0, 153, 255, 0.1);
+  }
+
+  [data-theme="light"] .number-stepper {
+    background: rgba(255, 255, 255, 0.8);
+    border-color: rgba(37, 99, 235, 0.15);
+  }
+
+  [data-theme="light"] .number-stepper:focus-within {
+    border-color: rgba(37, 99, 235, 0.4);
+    background: #fff;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+  }
+
+  .stepper-btn {
+    @apply flex items-center justify-center flex-shrink-0 cursor-pointer select-none bg-transparent border-0 font-heading font-bold text-base transition-colors duration-150;
+    width: 32px;
+    height: 36px;
+    color: rgba(255, 255, 255, 0.35);
+  }
+
+  .stepper-btn:hover {
+    color: #0099FF;
+  }
+
+  [data-theme="light"] .stepper-btn {
+    color: rgba(0, 0, 0, 0.3);
+  }
+
+  [data-theme="light"] .stepper-btn:hover {
+    color: #2563EB;
+  }
+
+  .stepper-input {
+    @apply text-center text-sm font-heading font-semibold outline-none bg-transparent border-0;
+    width: 60px;
+    height: 36px;
+    color: white;
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+
+  .stepper-input::-webkit-inner-spin-button,
+  .stepper-input::-webkit-outer-spin-button {
+    appearance: none;
+    -webkit-appearance: none;
+    margin: 0;
+  }
+
+  [data-theme="light"] .stepper-input {
+    color: #1e293b;
+  }
+
+  /* Password toggle inline */
+  .toggle-password-inline {
+    @apply self-start text-xs mt-1 bg-transparent border-0 cursor-pointer p-0 transition-colors duration-200;
+    color: rgba(0, 153, 255, 0.6);
+    font-family: inherit;
+  }
+
+  .toggle-password-inline:hover {
+    color: #0099FF;
+  }
+
+  [data-theme="light"] .toggle-password-inline {
+    color: rgba(37, 99, 235, 0.6);
+  }
+
+}

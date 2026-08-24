@@ -1,0 +1,328 @@
+import { typing } from "./presence";
+import { HistoryHandler } from "../db/historyHandler";
+import { EVENTS } from "@builderbot/bot";
+import { getArgentinaDatetimeString } from "../utils/ArgentinaTime";
+import { safeToAsk, syncAssistantTools } from "../apis/openai/openaiHelper";
+import { AssistantResponseProcessor } from "../apis/openai/AssistantResponseProcessor";
+import { stop, reset } from "./timeOut";
+import { updateMain } from "../apis/google/updateMain";
+
+export class AiManager {
+    private userTimeouts = new Map<string, NodeJS.Timeout>();
+    private readonly DEFAULT_TIMEOUT_MS = 60000;
+
+    constructor(
+        private openaiMain: any, // Objeto OpenAI (ahora dinámico vía openaiHelper)
+        private assistantId: string, // Mantenemos por compatibilidad
+        private errorReporter: any,
+        private flows: any
+    ) {}
+
+    /**
+     * Resuelve el ASSISTANT_MAP de forma dinámica para Hot-update.
+     */
+    public async getAssistantMap(projectId: string | null = null, serviceId: string | null = null): Promise<Record<string, string | undefined>> {
+        const assistant1 = await HistoryHandler.getConfig('ASSISTANT_1', projectId, serviceId) || await HistoryHandler.getConfig('ASSISTANT_ID', projectId, serviceId);
+        const map = {
+            asistente1: assistant1 || this.assistantId,
+            asistente2: await HistoryHandler.getConfig('ASSISTANT_2', projectId, serviceId) || undefined,
+            asistente3: await HistoryHandler.getConfig('ASSISTANT_3', projectId, serviceId) || undefined,
+            asistente4: await HistoryHandler.getConfig('ASSISTANT_4', projectId, serviceId) || undefined,
+            asistente5: await HistoryHandler.getConfig('ASSISTANT_5', projectId, serviceId) || undefined,
+        };
+
+        // Log de diagnóstico silencioso para debug interno si se necesita
+        // console.log(`[AiManager] Assistant Map [${projectId || 'global'}]:`, Object.keys(map).filter(k => map[k]).join(', '));
+        
+        return map;
+    }
+
+    /**
+     * Retorna el Assistant ID asignado al usuario
+     */
+    public async getAssignedAssistantId(userId: string, forcedProjectId?: string): Promise<string> {
+        const assigned = await HistoryHandler.getAssignedAgent(userId, forcedProjectId) || 'asistente1';
+        const map = await this.getAssistantMap(forcedProjectId || null);
+        
+        const assistantId = map[assigned];
+        if (!assistantId) {
+            console.warn(`⚠️ [AiManager] No se encontró Assistant ID para '${assigned}'. Reconvirtiendo a asistente1.`);
+            return map['asistente1'] || this.assistantId;
+        }
+        return assistantId;
+    }
+
+    public getAssistantResponse = async (assistantId: string, message: string, state: any, fallbackMessage: string | undefined, userId: string, thread_id: string | null = null, projectId: string | null = null, agentName: string | undefined = undefined, serviceId: string | null = null) => {
+        if (this.userTimeouts.has(userId)) {
+            clearTimeout(this.userTimeouts.get(userId)!);
+            this.userTimeouts.delete(userId);
+        }
+
+        return new Promise((resolve, reject) => {
+            const timeoutId = setTimeout(() => {
+                console.warn("⏱ Timeout de 60s alcanzado en la comunicación con OpenAI.");
+            }, this.DEFAULT_TIMEOUT_MS);
+            this.userTimeouts.set(userId, timeoutId);
+
+            const isWhatsApp = !!(userId && userId.includes('@s.whatsapp.net'));
+            const targetProjectId = projectId || HistoryHandler.PROJECT_IDENTIFIER;
+            const stateServiceId = (typeof state?.get === 'function') ? state.get('dynamicServiceId') : state?.dynamicServiceId;
+            const targetServiceId = serviceId || stateServiceId || HistoryHandler.SERVICE_IDENTIFIER;
+
+            safeToAsk(assistantId, message, state, userId, this.errorReporter, 5, isWhatsApp, targetProjectId, false, agentName, targetServiceId)
+                .then(result => {
+                    if (this.userTimeouts.has(userId)) {
+                        clearTimeout(this.userTimeouts.get(userId)!);
+                        this.userTimeouts.delete(userId);
+                    }
+                    resolve(result);
+                })
+                .catch(error => {
+                    if (this.userTimeouts.has(userId)) {
+                        clearTimeout(this.userTimeouts.get(userId)!);
+                        this.userTimeouts.delete(userId);
+                    }
+                    if (error?.message === 'TIMEOUT_SAFE_TO_ASK') {
+                        console.error(`[AiManager] Finalizando por timeout de seguridad para ${userId}`);
+                        resolve(fallbackMessage || "Lo siento, estoy tardando un poco más de lo habitual. Por favor, reintenta en un momento.");
+                    } else {
+                        reject(error);
+                    }
+                });
+        });
+    };
+
+    public analizarDestinoRecepcionista(respuesta: string): string | null {
+        if (!respuesta || typeof respuesta !== 'string') return null;
+        const lower = respuesta.toLowerCase();
+        
+        // Regex robusto: (derivar|derivando|derivo) [a|al|el|a la] asistente [1-5]
+        // Soporta puntos, comas o fin de línea tras el número.
+        const matchAsistente = lower.match(/(?:derivar|derivando|derivo)(?:\s+(?:a|al|el|a\s+la))?\s+asistente\s*([1-5])(?:\.|\b|$)/i);
+        if (matchAsistente) {
+            const num = matchAsistente[1];
+            console.log(`[AiManager] 🎯 Comando de derivación detectado: asistente${num}`);
+            return `asistente${num}`;
+        }
+
+        if (/(?:derivar|derivando|derivo)(?:\s+(?:a|al|el|a\s+la))?\s+(?:asesor|agente|humano|atencion|soporte)\s+humano\b/i.test(lower)) {
+            console.log(`[AiManager] 🎯 Comando de derivación detectado: asesor humano`);
+            return 'asistente_humano';
+        }
+
+        return null;
+    }
+
+    /**
+     * Extrae el bloque de resumen para el siguiente asistente.
+     */
+    private extraerResumenRecepcionista(respuesta: string): string {
+        const match = respuesta.match(/GET_RESUMEN[\s\S]+/i);
+        return match ? match[0].trim() : "Continúa con la atención del cliente.";
+    }
+
+    public processUserMessage = async (ctx: any, { flowDynamic, state, provider, gotoFlow }: any) => {
+        // Ruteo Multitenant Dinámico
+        const botPhoneNumber = provider?.globalVendorArgs?.phone_number_id || (ctx.to ? ctx.to.replace(/\D/g, '') : null);
+        const dynamicProjectId = await HistoryHandler.getProjectIdByRecipient(botPhoneNumber) || HistoryHandler.PROJECT_IDENTIFIER;
+        const dynamicServiceId = await HistoryHandler.getServiceIdByRecipient(botPhoneNumber) || HistoryHandler.SERVICE_IDENTIFIER;
+        
+        // Determinar el agente asignado. 
+        // Si no hay agente en el 'state' (redeploy/reset), forzamos asistente1
+        let assigned = state.get('assignedAgent');
+        if (!assigned) {
+            console.log(`[AiManager] 🔄 Sesión fresca o redeploy detectado para ${ctx.from}. Cargando agente asignado desde DB.`);
+            assigned = await HistoryHandler.getAssignedAgent(ctx.from, dynamicProjectId, dynamicServiceId);
+            await state.update({ assignedAgent: assigned });
+        } else {
+            // Si ya hay en state, verificar que coincida con DB (opcional, pero seguro)
+            const dbAssigned = await HistoryHandler.getAssignedAgent(ctx.from, dynamicProjectId, dynamicServiceId);
+            if (dbAssigned !== assigned) {
+                assigned = dbAssigned;
+                await state.update({ assignedAgent: dbAssigned });
+            }
+        }
+
+        const assistantMap = await this.getAssistantMap(dynamicProjectId, dynamicServiceId);
+        const assignedAssistantId = assistantMap[assigned] || this.assistantId;
+
+        // Guardar contexto en el state para uso en flujos (como idleFlow o reconectionFlow)
+        if (state && state.update) {
+            await state.update({ 
+                dynamicProjectId,
+                dynamicServiceId,
+                assignedAssistantId,
+                botPhoneNumber
+            });
+        }
+
+        console.log(`[AiManager] 📥 Procesando: ${ctx.from} | Proyecto: ${dynamicProjectId} | Agente: ${assigned}`);
+        
+        // --- COMANDO DE REINICIO ---
+        if (ctx.body && ctx.body.trim().toUpperCase() === '#RESET#') {
+            const chatId = ctx.from;
+            console.log(`[AiManager] ♻️ Reiniciando historial y agente para ${chatId}`);
+            await HistoryHandler.setAssignedAgent(chatId, 'asistente1', dynamicProjectId, dynamicServiceId);
+            await state.update({ assignedAgent: 'asistente1' });
+            return await flowDynamic("✅ Historial de conversación y asignación de asistente reiniciados.");
+        }
+
+        // --- COMANDO DE HILO NUEVO (BORRAR HISTORIAL COMPLETO DE MENSAJES) ---
+        if (ctx.body && ctx.body.trim().toUpperCase() === '#HILO_NUEVO#') {
+            const chatId = ctx.from;
+            console.log(`[AiManager] 🗑️ Borrando todo el historial de chat para el contacto ${chatId}`);
+            
+            // Borrar el historial de la base de datos (mensajes)
+            await HistoryHandler.clearChatHistory(chatId, dynamicProjectId, dynamicServiceId);
+            
+            // Resetear el agente asignado a asistente1
+            await HistoryHandler.setAssignedAgent(chatId, 'asistente1', dynamicProjectId, dynamicServiceId);
+            await state.update({ assignedAgent: 'asistente1' });
+            
+            return await flowDynamic("✅ Se ha borrado todo el historial de conversación de este contacto y se ha iniciado un nuevo hilo de chat.");
+        }
+        
+        try {
+            const body = ctx.body && ctx.body.trim();
+
+            // COMANDOS DE CONTROL (WhatsApp Admin)
+            if (body === "#ON#") {
+                await HistoryHandler.toggleBot(ctx.from, true, dynamicProjectId, dynamicServiceId);
+                if (ctx.pushName) await HistoryHandler.getOrCreateChat(ctx.from, 'whatsapp', ctx.pushName, ctx.userId, dynamicProjectId, dynamicServiceId);
+                const msg = "🤖 Bot activado para este chat.";
+                await flowDynamic([{ body: msg }]);
+                await HistoryHandler.saveMessage(ctx.from, 'assistant', msg, 'text', null, ctx.userId, null, ctx.platform, dynamicProjectId, dynamicServiceId);
+                return state;
+            }
+
+            if (body === "#OFF#") {
+                await HistoryHandler.toggleBot(ctx.from, false, dynamicProjectId, dynamicServiceId);
+                if (ctx.pushName) await HistoryHandler.getOrCreateChat(ctx.from, 'whatsapp', ctx.pushName, ctx.userId, dynamicProjectId, dynamicServiceId);
+                const msg = "🛑 Bot desactivado. (Intervención humana activa)";
+                await flowDynamic([{ body: msg }]);
+                await HistoryHandler.saveMessage(ctx.from, 'assistant', msg, 'text', null, ctx.userId, null, ctx.platform, dynamicProjectId, dynamicServiceId);
+                return state;
+            }
+
+            if (body === "#FULL_OFF#") {
+                await HistoryHandler.saveSetting('GLOBAL_BOT_ENABLED', 'false', dynamicProjectId, dynamicServiceId);
+                const msg = "🛑 Bot desactivado GLOBALMENTE para todas las conversaciones.";
+                await flowDynamic([{ body: msg }]);
+                await HistoryHandler.saveMessage(ctx.from, 'assistant', msg, 'text', null, ctx.userId, null, ctx.platform, dynamicProjectId, dynamicServiceId);
+                return state;
+            }
+
+            if (body === "#FULL_ON#") {
+                await HistoryHandler.saveSetting('GLOBAL_BOT_ENABLED', 'true', dynamicProjectId, dynamicServiceId);
+                const msg = "🤖 Bot activado GLOBALMENTE para todas las conversaciones.";
+                await flowDynamic([{ body: msg }]);
+                await HistoryHandler.saveMessage(ctx.from, 'assistant', msg, 'text', null, ctx.userId, null, ctx.platform, dynamicProjectId, dynamicServiceId);
+                return state;
+            }
+
+            // Filtro de Eco (Mejorado para BSUID)
+            if (ctx.key?.fromMe) {
+                stop(ctx);
+                return;
+            }
+
+            stop(ctx);
+
+            // ELIMINADO: Duplicado con provider.manager.ts
+            // await HistoryHandler.saveMessage( ... );
+
+            // --- FILTRO DE BOT GLOBAL ---
+            const isGlobalBotEnabledSetting = await HistoryHandler.getSetting('GLOBAL_BOT_ENABLED', dynamicProjectId, dynamicServiceId);
+            const isGlobalBotEnabled = isGlobalBotEnabledSetting !== 'false';
+            const isBotActiveForUser = await HistoryHandler.isBotEnabled(ctx.from, dynamicProjectId, dynamicServiceId);
+            const shouldApplyGlobalBotSwitch = ctx.type !== 'webchat';
+
+            if ((shouldApplyGlobalBotSwitch && !isGlobalBotEnabled) || !isBotActiveForUser) {
+                if (shouldApplyGlobalBotSwitch && !isGlobalBotEnabled) {
+                    console.log(`[AiManager] Bot DESACTIVADO GLOBALMENTE para el proyecto ${dynamicProjectId}.`);
+                }
+                stop(ctx);
+                // El webchat ignora el apagado global porque se usa para testear el bot.
+                return state;
+            }
+
+            await typing(ctx, provider);
+
+            // --- FILTRO DE LISTA NEGRA ---
+            const isBlacklisted = await HistoryHandler.isContactBlacklisted(ctx.from, dynamicProjectId, dynamicServiceId);
+            if (isBlacklisted) {
+                console.log(`[AiManager] ⛔ Contacto ${ctx.from} en lista negra (Sin Bot / Bloqueado). Intervención humana asegurada.`);
+                const currentBotState = await HistoryHandler.isBotEnabled(ctx.from, dynamicProjectId, dynamicServiceId);
+                if (currentBotState) {
+                    await HistoryHandler.toggleBot(ctx.from, false, dynamicProjectId, dynamicServiceId);
+                }
+                stop(ctx);
+                return state;
+            }
+
+
+            // Comandos Globales y Sheet Update
+            if (body === "#ACTUALIZAR#") {
+                try {
+                    console.log(`📡 [SYNC] Sincronizando hojas de Google, base de datos RAG y herramientas para proyecto: ${dynamicProjectId}, servicio: ${dynamicServiceId}...`);
+                    await updateMain(dynamicProjectId, dynamicServiceId);
+                    
+                    const currentAssistantMap = await this.getAssistantMap(dynamicProjectId);
+                    const currentAssistantId = currentAssistantMap[assigned] || this.assistantId;
+
+                    if (currentAssistantId) {
+                        console.log(`📡 [SYNC] Sincronizando herramientas con el asistente de OpenAI (${currentAssistantId})...`);
+                        await syncAssistantTools(currentAssistantId, dynamicProjectId, dynamicServiceId);
+                    }
+
+                    console.log('✅ [SYNC] Todo actualizado correctamente.');
+                    await flowDynamic([{ body: "🔄 Sincronización completada con éxito:\n1. Base de datos de Google Sheets actualizada.\n2. Documentos RAG re-indexados.\n3. Herramientas y funciones del asistente de OpenAI actualizadas." }]);
+                } catch (err: any) {
+                    console.error("[AiManager] Error en #ACTUALIZAR#:", err.message);
+                    await flowDynamic([{ body: "❌ Error al actualizar los datos operativos y el RAG." }]);
+                }
+                return state;
+            }
+
+            // Filtro de Broadcast/Channel
+            if (ctx.from) {
+                if (/@broadcast$/.test(ctx.from) || /@newsletter$/.test(ctx.from) || /@channel$/.test(ctx.from)) return;
+            }
+
+            // --- LÓGICA MULTI-AGENTE ---
+            const currentAssistantMap = await this.getAssistantMap(dynamicProjectId, dynamicServiceId);
+            const currentAssistantId = currentAssistantMap[assigned] || this.assistantId;
+
+            const response = (await this.getAssistantResponse(assignedAssistantId, ctx.body, state, undefined, ctx.from, ctx.thread_id, dynamicProjectId, assigned, dynamicServiceId)) as string;
+
+            if (!response) return state;
+
+            // No necesitamos guardar threadId en Chat Completions
+
+                // --- PROCESAR DERIVACIÓN Y TRANSICIÓN (HANDOVER COMPARTIDO) ---
+                await AssistantResponseProcessor.procesarHandoverYDerivacion(
+                    response,
+                    ctx,
+                    flowDynamic,
+                    state,
+                    provider,
+                    gotoFlow,
+                    this.getAssistantResponse.bind(this),
+                    assignedAssistantId,
+                    assigned,
+                    currentAssistantMap,
+                    dynamicProjectId,
+                    dynamicServiceId
+                );
+
+            const timeoutCierreValue = await HistoryHandler.getConfig('timeOutCierre', dynamicProjectId, dynamicServiceId) || 5;
+            const setTime = Number(timeoutCierreValue) * 60 * 1000;
+            reset(ctx, gotoFlow, setTime);
+            return state;
+
+        } catch (error: any) {
+            console.warn("⚠️ [AiManager] Comunicación con OpenAI fallida o no configurada. (Ignorando para permitir uso solo como CRM/Pasarela). Detalle:", error.message);
+            return state;
+        }
+    };
+}

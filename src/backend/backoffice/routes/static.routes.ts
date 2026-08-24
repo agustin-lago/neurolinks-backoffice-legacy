@@ -1,0 +1,337 @@
+import path from 'path';
+import fs from 'fs';
+import serve from 'serve-static';
+import { backofficeAuth } from '../middleware/auth'; // auth vive en backoffice/middleware
+import { HistoryHandler } from '../db/historyHandler';
+import { getAdapterProvider, getGroupProvider } from '../../providers/instances';
+import { getIdsByHost } from '../utils/routingResolver';
+
+let _visibilityCache: { wa: string; ig: string; ms: string; crm: string } | null = null;
+let _visibilityCacheAt = 0;
+const VISIBILITY_TTL = 10 * 1000;
+const getAppVersion = () => {
+    try {
+        const packagePath = path.join(process.cwd(), 'package.json');
+        const packageJson = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+        return packageJson.version || process.env.APP_VERSION || process.env.npm_package_version || '8.0.0';
+    } catch {
+        return process.env.APP_VERSION || process.env.npm_package_version || '8.0.0';
+    }
+};
+
+const getAssetVersion = () => {
+    const assetNames = [
+        'favicon.ico',
+        'favicon-16x16.png',
+        'favicon-32x32.png',
+        'apple-touch-icon.png',
+        'android-chrome-192x192.png',
+        'android-chrome-512x512.png',
+        'site.webmanifest',
+    ];
+
+    const mtimes = assetNames
+        .map(name => path.join(process.cwd(), 'assets', name))
+        .filter(filePath => fs.existsSync(filePath))
+        .map(filePath => fs.statSync(filePath).mtimeMs);
+
+    return String(Math.max(Date.now(), ...mtimes));
+};
+
+const getSpaRoutes = (): string[] => {
+    const navConfigPath = path.join(process.cwd(), 'src', 'frontend', 'js', 'core', 'navigation-config.js');
+    const navConfig = fs.readFileSync(navConfigPath, 'utf8');
+    const routesBlock = navConfig.match(/const\s+APP_ROUTES\s*=\s*\{([\s\S]*?)\n\s*\};/);
+    if (!routesBlock) throw new Error('APP_ROUTES no encontrado en navigation-config.js');
+
+    const routes = Array.from(routesBlock[1].matchAll(/['"]([^'"]+)['"]\s*:/g))
+        .map(match => match[1])
+        .filter(route => route.startsWith('/'));
+
+    return Array.from(new Set([...routes, '/tickets']));
+};
+
+export const invalidateVisibilityCache = () => { _visibilityCache = null; };
+
+/**
+ * Registra las rutas de servicio de HTML y archivos estáticos.
+ */
+export const registerStaticRoutes = (app: any, { __dirname }: { __dirname: string }) => {
+
+    const serveHtmlPage = (route: string, filename: string, middlewares: any[] = []) => {
+        const handler = async (req: any, res: any) => {
+            try {
+                const possiblePaths = [
+                    path.join(process.cwd(), 'src', 'frontend', 'html', filename),
+                    path.join(process.cwd(), 'src', 'html', filename),
+                    path.join(process.cwd(), filename),
+                    path.join(process.cwd(), 'src', filename),
+                    path.join(__dirname, '..', '..', 'frontend', 'html', filename),
+                    path.join(__dirname, 'html', filename),
+                    path.join(__dirname, filename),
+                    path.join(__dirname, '..', '..', '..', 'src', 'frontend', 'html', filename)
+                ];
+
+                let htmlPath = null;
+                for (const p of possiblePaths) {
+                    if (fs.existsSync(p) && fs.lstatSync(p).isFile()) {
+                        htmlPath = p;
+                        break;
+                    }
+                }
+
+                if (htmlPath) {
+                    let htmlContent = fs.readFileSync(htmlPath, 'utf8');
+                    const host = req.headers.host || '';
+                    const hostInfo = await getIdsByHost(host);
+                    const projectId = hostInfo?.projectId || HistoryHandler.PROJECT_IDENTIFIER || process.env.RAILWAY_PROJECT_ID || "";
+                    const serviceId = hostInfo?.serviceId || HistoryHandler.SERVICE_IDENTIFIER || process.env.RAILWAY_SERVICE_ID || "";
+
+                    const resolveDisplayName = async (projId: string): Promise<string> => {
+                        if (projId) {
+                            try {
+                                const { data, error } = await HistoryHandler.getSupabase()
+                                    .from('proyectos_railway')
+                                    .select('nombre_personalizado')
+                                    .eq('railway_project_id', projId)
+                                    .maybeSingle();
+
+                                if (!error && data?.nombre_personalizado) {
+                                    return data.nombre_personalizado;
+                                }
+                            } catch (error: any) {
+                                console.warn('[Static] No se pudo obtener nombre_personalizado:', error?.message || error);
+                            }
+                        }
+
+                        return process.env.RAILWAY_SERVICE_NAME || process.env.ASSISTANT_NAME || process.env.BOT_NAME || "Neurolinks";
+                    };
+                    const botName = await resolveDisplayName(projectId);
+
+                    console.log(`[Static] 🟢 Sirviendo ${filename} para ${route}. botName=${botName}`);
+
+                    // Helper con timeout para evitar bloqueos por red hacia Supabase
+                    const getSettingSafe = async (key: string, defaultValue: string = 'true'): Promise<string> => {
+                        try {
+                            const timeoutPromise = new Promise<string>((_, reject) =>
+                                setTimeout(() => reject(new Error('Timeout')), 2500)
+                            );
+                            const result = await Promise.race([
+                                HistoryHandler.getSetting(key),
+                                timeoutPromise
+                            ]) as string | null;
+                            return result !== null ? result : defaultValue;
+                        } catch (e) {
+                            console.warn(`[Static] ⚠️ Timeout/Error obteniendo setting ${key}, usando default: ${defaultValue}`);
+                            return defaultValue;
+                        }
+                    };
+
+                    // Obtener configuración de visibilidad (cacheada para evitar queries en cada navegación)
+                    const now = Date.now();
+                    if (!_visibilityCache || (now - _visibilityCacheAt) > VISIBILITY_TTL) {
+                        ['WHATSAPP_VISIBLE', 'INSTAGRAM_VISIBLE', 'MESSENGER_VISIBLE', 'CRM_VISIBLE']
+                            .forEach(k => HistoryHandler.invalidateSettingCache(k));
+                        const [dbWa, dbIg, dbMs, dbCRM] = await Promise.all([
+                            getSettingSafe('WHATSAPP_VISIBLE'),
+                            getSettingSafe('INSTAGRAM_VISIBLE', 'false'),
+                            getSettingSafe('MESSENGER_VISIBLE', 'false'),
+                            getSettingSafe('CRM_VISIBLE', 'true')
+                        ]);
+                        _visibilityCache = { wa: dbWa, ig: dbIg, ms: dbMs, crm: dbCRM };
+                        _visibilityCacheAt = now;
+                    }
+                    const cache = _visibilityCache!;
+                    const [dbWa, dbIg, dbMs, dbCRM] = [cache.wa, cache.ig, cache.ms, cache.crm];
+
+                    // Si cualquiera de las plataformas está activa, mostrar backoffice
+                    const isAnyPlatformActive = (dbWa !== 'false') || (dbIg === 'true') || (dbMs === 'true');
+                    const showBackoffice = isAnyPlatformActive ? '' : 'hidden-item';
+                    const showCRM = (dbCRM === 'false' || (!dbCRM && process.env.CRM_VISIBLE === 'false')) ? 'hidden-item' : '';
+
+                    // Reemplazo universal de placeholders
+                    const projectName = botName;
+                    htmlContent = htmlContent.replace(/{{BOT_NAME}}/g, botName);
+                    htmlContent = htmlContent.replace(/{{ASSISTANT_NAME}}/g, botName);
+                    htmlContent = htmlContent.replace(/{{PROJECT_NAME}}/g, projectName);
+                    htmlContent = htmlContent.replace(/{{PROJECT_ID}}/g, projectId);
+                    htmlContent = htmlContent.replace(/{{SERVICE_ID}}/g, serviceId);
+                    htmlContent = htmlContent.replace(/{{APP_VERSION}}/g, getAppVersion());
+                    htmlContent = htmlContent.replace(/{{ASSET_VERSION}}/g, getAssetVersion());
+                    htmlContent = htmlContent.replace(/{{SHOW_BACKOFFICE_STYLE}}/g, showBackoffice);
+                    htmlContent = htmlContent.replace(/{{SHOW_CRM_STYLE}}/g, showCRM);
+
+                    res.setHeader('Content-Type', 'text/html');
+                    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+                    console.log(`[Static] ✅ ${filename} procesado y enviado.`);
+                    res.end(htmlContent);
+                } else {
+                    console.warn(`[Static] ❌ Archivo ${filename} no encontrado para la ruta ${route}`);
+                    res.status(404).send('HTML no encontrado en el servidor');
+                }
+            } catch (err) {
+                console.error(`Error sirviendo ${filename}:`, err);
+                res.status(500).send('Error interno al servir HTML');
+            }
+        };
+
+        // Registrar rutas con opcionalmente middlewares
+        if (middlewares.length > 0) {
+            app.get(route, ...middlewares, handler);
+            if (route !== "/") app.get(route + '/', ...middlewares, handler);
+        } else {
+            app.get(route, handler);
+            if (route !== "/") app.get(route + '/', handler);
+        }
+    };
+
+    // Paginas standalone (no forman parte del SPA shell)
+    serveHtmlPage("/login", "login.html");
+
+    // Rutas SPA: se leen desde navigation-config.js para evitar duplicar rutas front/back.
+    getSpaRoutes().forEach(route => serveHtmlPage(route, "shell.html"));
+
+    // Favicon directo: priorizar assets/ porque ahí se actualizan los iconos públicos.
+    app.get("/favicon.ico", (_req: any, res: any) => {
+        const candidates = [
+            path.join(process.cwd(), "assets", "favicon.ico"),
+            path.join(process.cwd(), "src", "backend", "assets", "favicon.ico"),
+        ];
+        const p = candidates.find(c => fs.existsSync(c));
+        if (p) {
+            res.setHeader("Content-Type", "image/x-icon");
+            res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+            fs.createReadStream(p).pipe(res);
+        } else {
+            res.statusCode = 204; res.end();
+        }
+    });
+
+    // Servir archivos estáticos
+    const noCacheStaticOptions = {
+        setHeaders: (res: any) => {
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+            res.setHeader('Pragma', 'no-cache');
+            res.setHeader('Expires', '0');
+        }
+    };
+
+    app.get('/app.js', (req: any, res: any) => {
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+        res.sendFile(path.join(process.cwd(), 'src', 'frontend', 'app.js'));
+    });
+    app.use("/js", serve(path.join(process.cwd(), "src", "frontend", "js"), noCacheStaticOptions));
+    app.use("/style", serve(path.join(process.cwd(), "src", "frontend", "style"), noCacheStaticOptions));
+    app.use("/assets", serve(path.join(process.cwd(), "assets")));
+    app.use("/assets", serve(path.join(process.cwd(), "src", "backend", "assets")));
+    // Vendor packages instalados localmente
+    app.use("/vendor/toast", serve(path.join(process.cwd(), "node_modules", "nextjs-toast-notify", "dist")));
+    app.use("/vendor/fontawesome", serve(path.join(process.cwd(), "node_modules", "@fortawesome", "fontawesome-free")));
+    const tempDir = path.join(process.cwd(), "temp");
+    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+    const tmpDir = path.join(process.cwd(), "tmp");
+    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+
+    app.use("/uploads", serve(path.join(process.cwd(), "uploads")));
+    app.use("/temp", serve(tempDir));
+    app.use("/app/temp", serve(tempDir));
+    app.use("/tmp", serve(tmpDir));
+    app.use("/app/tmp", serve(tmpDir));
+
+    app.get("/api/test-tmp", (_req: any, res: any) => {
+        try {
+            const cwd = process.cwd();
+            const tmpPath = path.join(cwd, "tmp");
+            const tempPath = path.join(cwd, "temp");
+            
+            const tmpExists = fs.existsSync(tmpPath);
+            const tempExists = fs.existsSync(tempPath);
+            
+            const tmpFiles = tmpExists ? fs.readdirSync(tmpPath) : [];
+            const tempFiles = tempExists ? fs.readdirSync(tempPath) : [];
+            
+            res.json({
+                cwd,
+                tmpPath,
+                tmpExists,
+                tmpFiles,
+                tempPath,
+                tempExists,
+                tempFiles
+            });
+        } catch (e: any) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+
+    // QR genérico / Principal (Con fallback a memoria para evitar 404)
+    app.get("/qr.png", async (req: any, res: any) => {
+        try {
+            res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+            res.setHeader('Pragma', 'no-cache');
+            res.setHeader('Expires', '0');
+
+            const qrPath = path.join(process.cwd(), 'bot.qr.png');
+            if (fs.existsSync(qrPath)) {
+                res.setHeader('Content-Type', 'image/png');
+                return fs.createReadStream(qrPath).pipe(res);
+            }
+
+            // Fallback: Si no hay archivo, usar el provider de la instancia global
+            const provider = getAdapterProvider();
+            if (provider && provider.qrCodeString) {
+                console.log("[Static] QR physical file missing, generating from memory...");
+                const QRCode = await import('qrcode');
+                const imgBuffer = await QRCode.toBuffer(provider.qrCodeString);
+                res.setHeader('Content-Type', 'image/png');
+                return res.end(imgBuffer);
+            }
+
+            res.status(404).send('QR not found (no file, no memory)');
+        } catch (e) {
+            console.error("[Static] Error serving QR:", e);
+            res.status(500).send('Error serving QR');
+        }
+    });
+
+    // QR específico para grupos / motor secundario
+    app.get("/bot.groups.qr.png", async (req: any, res: any) => {
+        try {
+            res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+            res.setHeader('Pragma', 'no-cache');
+            res.setHeader('Expires', '0');
+
+            const qrPath = path.join(process.cwd(), 'bot.groups.qr.png');
+            const groupProvider = getGroupProvider();
+            const fileExists = fs.existsSync(qrPath);
+            console.log('[Static] Group QR requested', {
+                fileExists,
+                hasMemoryQr: Boolean((groupProvider as any)?.qrCodeString),
+                providerReady: Boolean((groupProvider as any)?.isReady),
+                connectionState: (groupProvider as any)?.connectionState || null
+            });
+
+            if (fileExists) {
+                res.setHeader('Content-Type', 'image/png');
+                return fs.createReadStream(qrPath).pipe(res);
+            }
+
+            // Fallback para grupos usando la instancia global
+            if (groupProvider && groupProvider.qrCodeString) {
+                console.log("[Static] Group QR physical file missing, generating from memory...");
+                const QRCode = await import('qrcode');
+                const imgBuffer = await QRCode.toBuffer(groupProvider.qrCodeString);
+                res.setHeader('Content-Type', 'image/png');
+                return res.end(imgBuffer);
+            }
+
+            res.status(404).send('QR Groups not found');
+        } catch (e) {
+            console.error("[Static] Error serving Group QR:", e);
+            res.status(500).send('Error serving Group QR');
+        }
+    });
+
+};

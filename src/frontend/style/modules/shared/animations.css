@@ -1,0 +1,32 @@
+/* Message slide-in animations (outside @layer to avoid Tailwind processing issues) */
+@keyframes msgSlideLeft {
+  from {
+    opacity: 0;
+    transform: translateX(-16px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes msgSlideRight {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.msg.msg-animate.user {
+  animation: msgSlideLeft 0.22s cubic-bezier(0.2, 0, 0, 1) both;
+}
+
+.msg.msg-animate.assistant {
+  animation: msgSlideRight 0.22s cubic-bezier(0.2, 0, 0, 1) both;
+}

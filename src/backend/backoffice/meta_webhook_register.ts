@@ -1,0 +1,146 @@
+import { createClient } from "@supabase/supabase-js";
+import axios from "axios";
+import { vault } from "../db/vault";
+
+// Inicializar cliente de Supabase
+const supabaseUrl = process.env.SUPABASE_URL || vault.supabaseUrl;
+const supabaseKey = process.env.SUPABASE_KEY || vault.supabaseKey;
+const supabase = createClient(supabaseUrl, supabaseKey);
+
+// Capturar argumentos de la línea de comandos
+const args = process.argv.slice(2);
+const projectId = args[0];
+const serviceId = args[1];
+
+if (!projectId || projectId.startsWith("-")) {
+    console.error("\n❌ Error: Falta el ID de Proyecto.");
+    console.log("\n📖 Uso correcto:");
+    console.log("  npx tsx src/backend/backoffice/meta_webhook_register.ts <project_id> [service_id]");
+    console.log("  Ejemplo:");
+    console.log("  npx tsx src/backend/backoffice/meta_webhook_register.ts 5678d0d0-7256-496e-ac1c-d0dd2c41db07 7f8e7a76-00c1-436d-b124-fb59b1779a68\n");
+    process.exit(1);
+}
+
+async function main() {
+    console.log(`\n📡 [REGISTRO] Buscando credenciales de Meta para el Proyecto: ${projectId}, Servicio: ${serviceId || 'cualquiera'}...\n`);
+
+    try {
+        // 1. Obtener onboarding de Supabase
+        let query = supabase
+            .from("meta_onboarding")
+            .select("*")
+            .eq("project_id", projectId);
+
+        if (serviceId) {
+            query = query.eq("service_id", serviceId);
+        }
+
+        const { data: onboarding, error: onboardErr } = await query.maybeSingle();
+
+        if (onboardErr) throw onboardErr;
+
+        if (!onboarding) {
+            console.error(`❌ Error: No se encontraron credenciales en 'meta_onboarding' para el proyecto: ${projectId}${serviceId ? ` y servicio: ${serviceId}` : ''}.`);
+            console.log("Por favor, asegúrate de que el proyecto haya completado la fase de onboarding en el Backoffice.\n");
+            return;
+        }
+
+        const { waba_id: wabaId, phone_number_id: phoneId, access_token: token, service_id: onboardServiceId } = onboarding;
+        const targetServiceId = serviceId || onboardServiceId || 'default_service';
+
+        if (!wabaId || !phoneId) {
+            console.error("❌ Error: Faltan identificadores críticos (WABA ID o Phone ID) en el registro de onboarding.");
+            return;
+        }
+
+        console.log(`✅ Credenciales encontradas:`);
+        console.log(`   • WABA ID   : ${wabaId}`);
+        console.log(`   • Phone ID  : ${phoneId}`);
+        console.log(`   • Token     : ${token ? "Cargado (Oculto)" : "Faltante"}\n`);
+
+        if (!token || token === "PENDING") {
+            console.error("❌ Error: El token de acceso está en estado PENDING o vacío. No se puede interactuar con Meta.");
+            return;
+        }
+
+        // 2. Determinar la URL del bot para el ruteo de webhooks
+        let projectUrl = "https://bot-rialway-monoagente-production-1287.up.railway.app"; // Fallback por defecto
+        
+        console.log("📡 Consultando la base de datos para obtener la URL estática de Railway para este proyecto...");
+        let domainQuery = supabase
+            .from("settings")
+            .select("key, value")
+            .eq("project_id", projectId)
+            .in("key", ["RAILWAY_STATIC_URL", "RAILWAY_PUBLIC_DOMAIN", "PROJECT_URL"]);
+
+        if (targetServiceId) {
+            domainQuery = domainQuery.eq("service_id", targetServiceId);
+        }
+
+        const { data: allDomains } = await domainQuery;
+
+        // Priorizar siempre el dominio estático nativo de Railway (*.up.railway.app) ya que no depende de DNS personalizados
+        const staticRailwayDomain = allDomains?.find(d => d.value && d.value.includes('.up.railway.app'));
+
+        if (staticRailwayDomain?.value) {
+            const domain = staticRailwayDomain.value;
+            projectUrl = domain.startsWith("http") ? domain : `https://${domain}`;
+            console.log(`   👉 Dominio Estático Railway detectado (*.up.railway.app): ${projectUrl}`);
+        } else if (allDomains && allDomains.length > 0 && allDomains[0].value) {
+            const domain = allDomains[0].value;
+            projectUrl = domain.startsWith("http") ? domain : `https://${domain}`;
+            console.log(`   👉 Dominio secundario detectado: ${projectUrl}`);
+        } else {
+            console.log(`   ⚠️ Sin URL en settings. Usando URL fallback: ${projectUrl}`);
+        }
+
+        // Limpiar slash final para mantener consistencia
+        if (projectUrl.endsWith("/")) {
+            projectUrl = projectUrl.slice(0, -1);
+        }
+
+        // 3. Sincronizar la routing_table para el enrutador central de webhooks
+        console.log(`\n📡 [MIGRACIÓN] Sincronizando enrutador 'routing_table' (Servicio: ${targetServiceId})...`);
+        const { error: routeErr } = await supabase
+            .from("routing_table")
+            .upsert({
+                phone_number_id: phoneId,
+                waba_id: wabaId,
+                project_id: projectId,
+                service_id: targetServiceId,
+                project_url: projectUrl,
+                updated_at: new Date().toISOString()
+            }, { onConflict: "phone_number_id" });
+
+        if (routeErr) throw routeErr;
+        console.log("✅ Enrutador de routing_table actualizado con éxito.");
+
+        // 4. Registrar la suscripción a la WABA en la API de Meta Graph
+        console.log(`\n📡 [META] Suscribiendo la aplicación a los webhooks de la WABA ${wabaId} en Meta...`);
+        const response = await axios.post(`https://graph.facebook.com/v25.0/${wabaId}/subscribed_apps`, 
+            {}, 
+            { 
+                headers: { 'Authorization': `Bearer ${token}` },
+                params: { subscribed_fields: 'messages,smb_message_echoes' }
+            }
+        );
+
+        if (response.data && response.data.success) {
+            console.log("✅ Conexión de webhook confirmada de forma exitosa.");
+            console.log("\n🎉 ¡EL PROCESO FINALIZÓ CON ÉXITO! El número está listo para recibir y procesar mensajes.\n");
+        } else {
+            console.warn("⚠️ Meta respondió con éxito, pero la estructura de respuesta es inusual:", response.data);
+        }
+
+    } catch (err: any) {
+        console.error("\n❌ Error crítico durante el registro del webhook:");
+        if (err.response?.data) {
+            console.error(JSON.stringify(err.response.data, null, 2));
+        } else {
+            console.error(err.message || err);
+        }
+        console.log("");
+    }
+}
+
+main().catch(console.error);

@@ -1,0 +1,139 @@
+import { WebDriver, By, until } from 'selenium-webdriver';
+import * as fs from 'fs';
+import * as path from 'path';
+
+/**
+ * Clase para manejar la autenticación del administrador utilizando Selenium.
+ * Esta clase recibe una instancia del WebDriver activa y realiza el inicio de sesión.
+ */
+export class LoginAdminSelenium {
+    private driver: WebDriver;
+
+    constructor(driver: WebDriver) {
+        this.driver = driver;
+    }
+
+    /**
+     * Realiza el login del administrador utilizando localizadores XPath.
+     * 
+     * @param username Nombre de usuario del administrador.
+     * @param password Contraseña del administrador.
+     * @returns Promesa que resuelve a `true` si el login es exitoso o `false` en caso contrario.
+     */
+    public async login(username: string, password: string): Promise<boolean> {
+        if (!username || !password) {
+            console.error("❌ [SeleniumAuth] Las credenciales de administrador (GANAMOSNET_USER / GANAMOSNET_PASS) no están configuradas.");
+            return false;
+        }
+        console.log(`[SeleniumAuth] Iniciando sesión para el administrador: ${username}...`);
+
+        try {
+            const targetUrl = "https://agents.ganamosnet.org/"; 
+            await this.driver.get(targetUrl);
+
+            // Verificar si la IP entregada por la proxy rotatoria fue bloqueada (403 Forbidden)
+            let pageSource = await this.driver.getPageSource();
+            if (pageSource.includes('Forbidden') || pageSource.includes('REQUEST-IP') || pageSource.includes('403')) {
+                console.warn('⚠️ [SeleniumAuth] IP rotatoria bloqueada con 403. Reintentando refresh para forzar rotación de IP...');
+                await this.driver.navigate().refresh();
+                await this.driver.sleep(2000);
+                pageSource = await this.driver.getPageSource();
+                if (pageSource.includes('Forbidden') || pageSource.includes('REQUEST-IP')) {
+                    console.error('❌ [SeleniumAuth] IP rotatoria rechazada por el servidor objetivo (403 Forbidden).');
+                    return false;
+                }
+            }
+
+            // XPaths genéricos para los campos del formulario
+            const userXPath = "/html/body/div[3]/div/section/div/div[2]/div[1]/input";
+            const passwordXPath = "/html/body/div[3]/div/section/div/div[2]/div[2]/div[2]/input";
+            const submitButtonXPath = "/html/body/div[3]/div/section/div/div[2]/div[3]/button";
+
+            // 1. Localizar y escribir en el campo de usuario (Timeout 15s para React SPA en proxy)
+            let userInput: any = null;
+            try {
+                userInput = await this.driver.wait(until.elementLocated(By.xpath(userXPath)), 15000);
+            } catch (e) {
+                console.log('⚠️ [SeleniumAuth] XPath primario no localizado en 15s. Probando selectores CSS...');
+                userInput = await this.driver.wait(until.elementLocated(By.css('input[type="text"], input[name="username"], input.form-control')), 5000);
+            }
+            await userInput.sendKeys(username);
+
+            // 2. Localizar y escribir en el campo de contraseña
+            let passwordInput: any = null;
+            try {
+                passwordInput = await this.driver.findElement(By.xpath(passwordXPath));
+            } catch (e) {
+                passwordInput = await this.driver.findElement(By.css('input[type="password"], input[name="password"]'));
+            }
+            await passwordInput.sendKeys(password);
+
+            // 3. Localizar y hacer click en el botón de ingreso
+            let submitButton: any = null;
+            try {
+                submitButton = await this.driver.findElement(By.xpath(submitButtonXPath));
+            } catch (e) {
+                submitButton = await this.driver.findElement(By.css('button[type="submit"], button.btn-primary, button'));
+            }
+            await submitButton.click();
+
+            // 4. Esperar a que la URL cambie tras hacer clic o aparezca un mensaje de error en pantalla
+            const loginResult: any = await this.driver.wait(async (d) => {
+                const currentUrl = await d.getCurrentUrl();
+                if (currentUrl !== targetUrl) {
+                    return { success: true };
+                }
+
+                // Buscar elementos que contengan texto de error en la interfaz
+                const errorElements = await d.findElements(By.xpath("//*[contains(text(), 'Error') or contains(text(), 'error') or contains(text(), '504')]"));
+                if (errorElements.length > 0) {
+                    for (const el of errorElements) {
+                        try {
+                            const text = await el.getText();
+                            if (text && (text.includes('504') || text.toLowerCase().includes('error'))) {
+                                return { success: false, error: text };
+                            }
+                        } catch (e) {
+                            // Ignorar si el elemento ya no está en el DOM
+                        }
+                    }
+                }
+                return false;
+            }, 15000);
+
+            if (loginResult && !loginResult.success) {
+                console.error(`❌ [SeleniumAuth] Login fallido por error del servidor de Ganamos: "${loginResult.error}"`);
+                return false;
+            }
+
+            const finalUrl = await this.driver.getCurrentUrl();
+            console.log(`[SeleniumAuth] Sesión de administrador iniciada con éxito. URL actual: ${finalUrl}`);
+            return true;
+
+        } catch (error: any) {
+            console.error("❌ Error en el proceso de inicio de sesión de Selenium:", error.message || error);
+            try {
+                const currentUrl = await this.driver.getCurrentUrl();
+                const pageTitle = await this.driver.getTitle();
+                const pageSource = await this.driver.getPageSource();
+
+                console.log(`🔍 [Depuración Remota] URL al fallar: "${currentUrl}"`);
+                console.log(`🔍 [Depuración Remota] Título al fallar: "${pageTitle}"`);
+                console.log(`🔍 [Depuración Remota] Fragmento HTML (primeros 1000 caracteres):\n`, pageSource.substring(0, 1000));
+
+                console.log("📸 Tomando captura de pantalla por fallo de inicio de sesión...");
+                const screenshot = await this.driver.takeScreenshot();
+                const screenshotPath = path.join(process.cwd(), 'login_failure.png');
+                fs.writeFileSync(screenshotPath, screenshot, 'base64');
+                console.log(`📸 Captura de pantalla de inicio de sesión guardada en: ${screenshotPath}`);
+
+                const sourcePath = path.join(process.cwd(), 'login_failure_page.html');
+                fs.writeFileSync(sourcePath, pageSource, 'utf8');
+                console.log(`📄 Código fuente de la página guardado en: ${sourcePath}`);
+            } catch (screenErr: any) {
+                console.error("⚠️ No se pudo tomar la captura de pantalla o leer datos del navegador:", screenErr.message);
+            }
+            return false;
+        }
+    }
+}

@@ -1,0 +1,42 @@
+/* â”€â”€â”€ Fuera de @layer: no se purga aunque la clase sea solo dinÃ¡mica (JS) â”€â”€â”€ */
+.tag-pill {
+  display: inline-flex !important;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 9999px !important;
+  font-size: 8px !important;
+  font-family: 'Montserrat', sans-serif;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+  max-width: fit-content;
+  flex-shrink: 0;
+  transition: opacity 0.15s, transform 0.15s;
+}
+
+.tag-item-edit .tag-pill {
+  font-size: 8px !important;
+}
+
+#available-tags-to-assign .tag-pill {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block !important;
+}
+
+#tag-list-editor .tag-pill {
+  max-width: calc(100% - 52px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block !important;
+}
+
+.chat-tags-list {
+  min-width: 0;
+  overflow: hidden;
+  mask-image: linear-gradient(to right, black 75%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, black 75%, transparent 100%);
+}

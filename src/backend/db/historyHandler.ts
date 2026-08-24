@@ -1,0 +1,4945 @@
+
+import { createClient } from "@supabase/supabase-js";
+import { EventEmitter } from "events";
+import dotenv from "dotenv";
+import crypto from "crypto";
+
+import { vault } from "./vault";
+import { LocalHistoryStore } from "./localHistoryStore";
+
+dotenv.config();
+
+const sanitizeJsonPayload = (payload: any): any => {
+    if (!payload) return null;
+    try {
+        const seen = new WeakSet();
+        return JSON.parse(JSON.stringify(payload, (_key, value) => {
+            if (typeof value === 'bigint') return value.toString();
+            if (typeof value === 'function' || typeof value === 'symbol') return undefined;
+            if (value && typeof value === 'object') {
+                if (seen.has(value)) return '[Circular]';
+                seen.add(value);
+            }
+            return value;
+        }));
+    } catch {
+        return null;
+    }
+};
+
+const supabaseUrl = process.env.SUPABASE_URL || vault.supabaseUrl;
+const supabaseKey = process.env.SUPABASE_KEY || vault.supabaseKey;
+const supabase = createClient(supabaseUrl, supabaseKey);
+export { supabase };
+
+// Emitter para notificar cambios en tiempo real a otros módulos (como el de WebSockets)
+export const historyEvents = new EventEmitter();
+
+// Cache en memoria para evitar que ecos de mensajes enviados por el bot via Meta Cloud API
+// sean detectados como intervención manual (Atención Humana) por el socket de Baileys.
+export const recentBotSentMessages = new Set<string>();
+
+export const normalizeTextForCache = (text: string): string => {
+    return (text || '')
+        .toLowerCase()
+        .replace(/[\s\p{P}]/gu, ''); // Elimina espacios y puntuación de cualquier tipo
+};
+
+// Identificador único para este bot específico
+// Identificador único para este bot específico (Usamos el UUID para consistencia total)
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const isScopedServiceId = (serviceId?: string | null): boolean => {
+    return !!serviceId && serviceId !== 'default' && serviceId !== 'default_service';
+};
+
+const getReplyPreviewContent = (content: any, type: string): string => {
+    if (type !== 'text') {
+        if (type === 'image') return 'Imagen';
+        if (type === 'video') return 'Video';
+        if (type === 'audio' || type === 'voice') return 'Audio';
+        return 'Archivo';
+    }
+
+    return String(content || 'Mensaje')
+        .replace(/<[^>]*>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 120) || 'Mensaje';
+};
+
+const resolveReplyMetadata = async (
+    chatId: string,
+    projectId: string,
+    serviceId: string | null,
+    rawReplyTo: string | null,
+    rawReplyPreview: any,
+    chatObj: any
+): Promise<{ replyTo: string | null; replyPreview: any }> => {
+    if (!rawReplyTo) {
+        return { replyTo: null, replyPreview: rawReplyPreview || null };
+    }
+
+    let referenced: any = null;
+    try {
+        const buildQuery = () => {
+            let query = supabase
+                .from('messages')
+                .select('id, external_id, role, content, type')
+                .in('chat_id', [chatId, `${chatId}@s.whatsapp.net`, `${chatId}@c.us`])
+                .eq('project_id', projectId);
+
+            if (isScopedServiceId(serviceId)) {
+                query = query.eq('service_id', serviceId);
+            }
+
+            return query.limit(1);
+        };
+
+        if (UUID_RE.test(rawReplyTo)) {
+            const { data } = await buildQuery().eq('id', rawReplyTo).maybeSingle();
+            referenced = data;
+        }
+
+        if (!referenced) {
+            const { data } = await buildQuery().eq('external_id', rawReplyTo).maybeSingle();
+            referenced = data;
+        }
+    } catch (err: any) {
+        console.warn('[HistoryHandler] No se pudo resolver reply quoted:', err?.message || err);
+    }
+
+    const replyTo = referenced?.id || rawReplyTo;
+    let replyPreview = rawReplyPreview || null;
+
+    if (referenced) {
+        const replyType = referenced.type || replyPreview?.type || 'text';
+        const author = referenced.role === 'assistant'
+            ? 'Vos'
+            : ((chatObj as any)?.name && (chatObj as any).name !== '[-]')
+                ? (chatObj as any).name
+                : String(chatId).split('@')[0];
+
+        replyPreview = {
+            ...(replyPreview || {}),
+            id: replyPreview?.id || referenced.external_id || referenced.id || rawReplyTo,
+            localId: replyPreview?.localId || referenced.id,
+            role: replyPreview?.role || referenced.role || null,
+            author: replyPreview?.author || author,
+            content: replyPreview?.content || getReplyPreviewContent(referenced.content, replyType),
+            type: replyType
+        };
+    }
+
+    return { replyTo, replyPreview };
+};
+const PROJECT_ID = process.env.RAILWAY_PROJECT_ID || "default_project";
+const PROJECT_NAME = process.env.RAILWAY_SERVICE_NAME || "Bot-RialWay";
+
+export interface Chat {
+    id: string; // WAID (Teléfono) o identificador de Webchat
+    user_id?: string | null; // BSUID (Meta Business-Scoped User ID)
+    project_id: string;
+    type: 'whatsapp' | 'webchat' | 'instagram' | 'messenger';
+    name: string | null;
+    email: string | null;
+    notes: string | null;
+    source: string | null;
+    bot_enabled: boolean;
+    last_message_at: string;
+    assigned_to?: string | null;
+    last_human_message_at: string | null;
+    metadata: any;
+}
+
+export interface Message {
+    id?: string;
+    chat_id: string;
+    project_id: string;
+    role: 'user' | 'assistant' | 'system';
+    content: string;
+    type: 'text' | 'image' | 'audio' | 'video' | 'location' | 'document';
+    external_id?: string | null;
+    reply_to?: string | null;
+    reply_preview?: any;
+    raw_payload?: any;
+    created_at?: string;
+}
+
+export class HistoryHandler {
+    static readonly PROJECT_IDENTIFIER = process.env.PROJECT_ID || process.env.RAILWAY_PROJECT_ID || "default_project";
+    static readonly PROJECT_ID = process.env.PROJECT_ID || process.env.RAILWAY_PROJECT_ID || "default_project";
+    static readonly SERVICE_IDENTIFIER = process.env.SERVICE_ID || process.env.RAILWAY_SERVICE_ID || "default_service";
+    static readonly SERVICE_ID = process.env.SERVICE_ID || process.env.RAILWAY_SERVICE_ID || "default_service";
+    static initialized = false;
+
+    // In-memory caches to optimize database performance and avoid Disk I/O exhaustion (Supabase Best Practice)
+    private static settingsCache = new Map<string, { value: string | null, timestamp: number }>();
+    private static chatCache = new Map<string, { data: any, timestamp: number }>();
+    private static tenantCache = new Map<string, { tenantId: string | null, resolved: boolean, globalScope: boolean, timestamp: number }>();
+    private static readonly CACHE_TTL_MS = 60 * 1000; // Settings cache: 1 minute
+    private static readonly CHAT_CACHE_TTL_MS = 15 * 1000; // Chat cache: 15 seconds
+    private static readonly TENANT_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutos para hits positivos
+
+    static async resolveTenantIdByProjectId(projectId: string): Promise<{ tenantId: string | null, resolved: boolean, globalScope: boolean }> {
+        if (!projectId) return { tenantId: null, resolved: false, globalScope: false };
+
+        if (projectId === 'default_project' || projectId === 'neurolinks-control' || projectId === 'defaul') {
+            return { tenantId: null, resolved: true, globalScope: true };
+        }
+
+        if (projectId.startsWith('client_')) {
+            const cached = this.tenantCache.get(projectId);
+            if (cached && (Date.now() - cached.timestamp < this.TENANT_CACHE_TTL_MS)) {
+                return { tenantId: cached.tenantId, resolved: cached.resolved, globalScope: cached.globalScope };
+            }
+
+            const clientId = projectId.replace('client_', '');
+            const { data, error } = await supabase.from('clientes').select('auth_user_id').eq('id', clientId).maybeSingle();
+            if (error) {
+                console.error(`[HistoryHandler] Error consultando cliente ${clientId}:`, error);
+                throw error;
+            }
+            if (data && data.auth_user_id) {
+                const result = { tenantId: data.auth_user_id, resolved: true, globalScope: false };
+                this.tenantCache.set(projectId, { ...result, timestamp: Date.now() });
+                return result;
+            }
+            return { tenantId: null, resolved: false, globalScope: false };
+        }
+
+        // Para projects railway, NO usamos cache para detectar UNLINK rápido y desvincular inmediatamente
+        const { data: link, error: linkError } = await supabase.from('proyectos_railway').select('cliente_id').eq('railway_project_id', projectId).maybeSingle();
+        if (linkError) {
+            console.error(`[HistoryHandler] Error consultando proyecto ${projectId}:`, linkError);
+            throw linkError;
+        }
+
+        if (link && link.cliente_id) {
+            const { data: client, error: clientError } = await supabase.from('clientes').select('auth_user_id').eq('id', link.cliente_id).maybeSingle();
+            if (clientError) {
+                console.error(`[HistoryHandler] Error consultando cliente ${link.cliente_id}:`, clientError);
+                throw clientError;
+            }
+
+            if (client && client.auth_user_id) {
+                return { tenantId: client.auth_user_id, resolved: true, globalScope: false };
+            }
+        }
+
+        // Si no hay error pero no hay tenant_id (porque el proyecto o el cliente no existe/no está vinculado)
+        return { tenantId: null, resolved: false, globalScope: false };
+    }
+
+    private static invalidateChatCache(rawChatId: string, projectId?: string) {
+        const chatId = this.normalizeId(rawChatId);
+        const currentProjectId = projectId || this.PROJECT_IDENTIFIER;
+        const cacheKey = `${currentProjectId}:${chatId}`;
+        this.chatCache.delete(cacheKey);
+    }
+
+    static getSupabase() {
+        return supabase;
+    }
+
+    // Listas de variables para control de UI y persistencia
+    static readonly EDITABLE_KEYS = [
+        'ASSISTANT_NAME', 'ASSISTANT_ID', 'ASSISTANT_2', 'ASSISTANT_3', 'ASSISTANT_4', 'ASSISTANT_5',
+        'ASSISTANT_PROMPT', 'ASSISTANT_PROMPT_2', 'ASSISTANT_PROMPT_3', 'ASSISTANT_PROMPT_4', 'ASSISTANT_PROMPT_5',
+        'OPENAI_API_KEY', 'OPENAI_ADMIN_API_KEY', 'ASSISTANT_ID_IMG', 'OPENAI_API_KEY_IMG', 'VECTOR_STORE_ID', 'EXTRA_SYSTEM_PROMPT',
+        'DB_TABLES', 'OPENAI_TOOLS_DEFINITION', 'msjCierre', 'msjSeguimiento1', 'msjSeguimiento2', 'msjSeguimiento3',
+        'timeOutCierre', 'timeOutSeguimiento2', 'timeOutSeguimiento3', 'ID_GRUPO_RESUMEN', 'ID_GRUPO_RESUMEN_2',
+        'SHEET_ID_RESUMEN', 'SHEET_ID_UPDATE', 'DOCX_ID_UPDATE', 'GOOGLE_CALENDAR_ID',
+        'ADMIN_USER', 'ADMIN_PASS', 'WHATSAPP_VISIBLE', 'INSTAGRAM_VISIBLE', 'MESSENGER_VISIBLE', 'CRM_FIELDS_CONFIG',
+        'CLIENT_SLUG', 'AQUAVITA_SWS_BASE_URL', 'AQUAVITA_SWS_USERNAME', 'AQUAVITA_SWS_PASSWORD',
+        'GANAMOSNET_USER', 'GANAMOSNET_PASS', 'CASEPC_USER', 'CASEPC_PASS',
+        'SUPER_ADMIN_MODE', 'SUPER_ADMIN_VISIBLE_SERVICES'
+    ];
+
+    static readonly FIXED_KEYS = [
+        'SUPABASE_URL', 'SUPABASE_KEY', 'RAILWAY_TOKEN', 'BACKOFFICE_TOKEN',
+        'GOOGLE_PRIVATE_KEY', 'GOOGLE_CLIENT_EMAIL', 'GOOGLE_MAPS_API_KEY',
+        'META_CONFIG_ID', 'META_APP_ID', 'META_APP_SECRET'
+    ];
+
+    static async initDatabase() {
+        if (this.initialized) return;
+        this.initialized = true;
+        console.log(`[HistoryHandler] Initializing DB for Project: ${this.PROJECT_IDENTIFIER}`);
+        if (!supabase) return;
+        // En modo local no hay schema remoto que inicializar
+        if (process.env.STORAGE_MODE === 'local') return;
+
+        // 0. Bootstrap de configuración
+        await this.bootstrapConfig();
+
+        // 0.05. Reclamar / Asignar automáticamente settings de 'default_service' o NULL al service_id activo de Railway
+        await this.autoMigrateSettingsServiceIdOnStartup();
+
+        // 0.1. Cargar todas las settings de la DB a process.env para compatibilidad con flujos legacy
+        await this.loadSettingsIntoProcessEnv();
+
+        // 0.2. Auto-sincronizar routing_table para el router central de Meta webhooks
+        await this.syncRoutingTableOnStartup();
+
+        // 0.3. Suscribirse a cambios en tiempo real de la tabla settings
+        this.subscribeToSettingsChanges();
+        this.subscribeToTicketChanges();
+        this.subscribeToUsersChanges();
+        this.subscribeToChatChanges();
+
+        console.log('🔍 [HistoryHandler] Verificando tablas de historial...');
+
+        const tables = [
+            {
+                name: 'chats',
+                sql: `CREATE TABLE IF NOT EXISTS chats (
+                    id TEXT,
+                    user_id TEXT,
+                    project_id TEXT,
+                    service_id TEXT,
+                    type TEXT NOT NULL,
+                    name TEXT,
+                    bot_enabled BOOLEAN DEFAULT true,
+                    assigned_agent TEXT DEFAULT 'asistente1',
+                    last_message_at TIMESTAMPTZ DEFAULT NOW(),
+                    last_human_message_at TIMESTAMPTZ,
+                    unread_count INTEGER DEFAULT 0,
+                    metadata JSONB DEFAULT '{}'::jsonb,
+                    PRIMARY KEY (id, project_id)
+                );
+                GRANT ALL ON TABLE chats TO service_role;
+                GRANT ALL ON TABLE chats TO authenticated;
+                GRANT SELECT ON TABLE chats TO anon;`
+            },
+            {
+                name: 'tags',
+                sql: `CREATE TABLE IF NOT EXISTS tags (
+                    id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+                    project_id TEXT,
+                    service_id TEXT,
+                    name TEXT NOT NULL,
+                    color TEXT DEFAULT '#000000',
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                GRANT ALL ON TABLE tags TO service_role;
+                GRANT ALL ON TABLE tags TO authenticated;
+                GRANT SELECT ON TABLE tags TO anon;`
+            },
+            {
+                name: 'indices',
+                sql: `
+                    CREATE INDEX IF NOT EXISTS idx_messages_chat_project ON messages(chat_id, project_id);
+                    CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
+                    CREATE INDEX IF NOT EXISTS idx_chats_project_id ON chats(project_id);
+                    CREATE INDEX IF NOT EXISTS idx_chats_last_message ON chats(last_message_at DESC);
+                    GRANT ALL ON TABLE messages TO service_role;
+                    GRANT ALL ON TABLE messages TO authenticated;
+                    GRANT SELECT ON TABLE messages TO anon;
+                    GRANT ALL ON TABLE chats TO service_role;
+                    GRANT ALL ON TABLE chats TO authenticated;
+                    GRANT SELECT ON TABLE chats TO anon;
+                `
+            },
+            {
+                name: 'chat_tags',
+                sql: `CREATE TABLE IF NOT EXISTS chat_tags (
+                    chat_id TEXT,
+                    tag_id uuid REFERENCES tags(id) ON DELETE CASCADE,
+                    project_id TEXT,
+                    service_id TEXT,
+                    PRIMARY KEY (chat_id, tag_id, project_id),
+                    FOREIGN KEY (chat_id, project_id) REFERENCES chats(id, project_id) ON UPDATE CASCADE ON DELETE CASCADE
+                );
+                GRANT ALL ON TABLE chat_tags TO service_role;
+                GRANT ALL ON TABLE chat_tags TO authenticated;
+                GRANT SELECT ON TABLE chat_tags TO anon;`
+            },
+            {
+                name: 'messages',
+                sql: `CREATE TABLE IF NOT EXISTS messages (
+                    id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+                    chat_id TEXT,
+                    project_id TEXT,
+                    service_id TEXT,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    type TEXT DEFAULT 'text',
+                    external_id TEXT UNIQUE,
+                    reply_to TEXT,
+                    reply_preview JSONB,
+                    raw_payload JSONB,
+                    status TEXT DEFAULT 'sent',
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    FOREIGN KEY (chat_id, project_id) REFERENCES chats(id, project_id) ON UPDATE CASCADE ON DELETE CASCADE
+                );
+                GRANT ALL ON TABLE messages TO service_role;
+                GRANT ALL ON TABLE messages TO authenticated;
+                GRANT SELECT ON TABLE messages TO anon;`
+            },
+            {
+                name: 'tickets',
+                sql: `CREATE TABLE IF NOT EXISTS tickets (
+                    id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+                    project_id TEXT,
+                    service_id TEXT,
+                    chat_id TEXT,
+                    titulo TEXT NOT NULL,
+                    descripcion TEXT,
+                    tipo TEXT DEFAULT 'Soporte',
+                    estado TEXT DEFAULT 'Abierto',
+                    prioridad TEXT DEFAULT 'Media',
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+                    FOREIGN KEY (chat_id, project_id) REFERENCES chats(id, project_id) ON UPDATE CASCADE ON DELETE CASCADE
+                );
+                GRANT ALL ON TABLE tickets TO service_role;
+                GRANT ALL ON TABLE tickets TO authenticated;
+                GRANT SELECT ON TABLE tickets TO anon;`
+            },
+            {
+                name: 'meta_onboarding',
+                sql: `CREATE TABLE IF NOT EXISTS meta_onboarding (
+                    project_id TEXT,
+                    service_id TEXT,
+                    waba_id TEXT,
+                    phone_number_id TEXT,
+                    access_token TEXT,
+                    onboarding_data JSONB DEFAULT '{}'::jsonb,
+                    owner_id uuid REFERENCES users(id),
+                    status TEXT DEFAULT 'active',
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+                    PRIMARY KEY (project_id, service_id)
+                );
+                GRANT ALL ON TABLE meta_onboarding TO service_role;
+                GRANT ALL ON TABLE meta_onboarding TO authenticated;
+                GRANT SELECT ON TABLE meta_onboarding TO anon;`
+            },
+            {
+                name: 'settings',
+                sql: `CREATE TABLE IF NOT EXISTS settings (
+                    project_id TEXT,
+                    service_id TEXT,
+                    key TEXT,
+                    value TEXT,
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+                    PRIMARY KEY (project_id, key)
+                );
+                GRANT ALL ON TABLE settings TO service_role;
+                GRANT ALL ON TABLE settings TO authenticated;
+                GRANT SELECT ON TABLE settings TO anon;`
+            },
+            {
+                name: 'users',
+                sql: `CREATE TABLE IF NOT EXISTS users (
+                    id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+                    project_id TEXT,
+                    service_id TEXT,
+                    username TEXT NOT NULL,
+                    password TEXT NOT NULL,
+                    full_name TEXT,
+                    meta_id TEXT,
+                    role TEXT DEFAULT 'subuser',
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE (project_id, username)
+                );
+                GRANT ALL ON TABLE users TO service_role;
+                GRANT ALL ON TABLE users TO authenticated;
+                GRANT SELECT ON TABLE users TO anon;`
+            },
+            {
+                name: 'routing_table',
+                sql: `CREATE TABLE IF NOT EXISTS routing_table (
+                    phone_number_id TEXT PRIMARY KEY,
+                    waba_id TEXT,
+                    project_id TEXT,
+                    service_id TEXT,
+                    project_url TEXT,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                GRANT ALL ON TABLE routing_table TO service_role;
+                GRANT ALL ON TABLE routing_table TO authenticated;
+                GRANT SELECT ON TABLE routing_table TO anon;`
+            },
+            {
+                name: 'mercadopago_payments_clients',
+                sql: `CREATE TABLE IF NOT EXISTS mercadopago_payments_clients (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT,
+                    service_id TEXT,
+                    chat_id TEXT,
+                    status TEXT,
+                    description TEXT,
+                    transaction_amount NUMERIC,
+                    payment_method_id TEXT,
+                    user_id TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                GRANT ALL ON TABLE mercadopago_payments_clients TO service_role;
+                GRANT ALL ON TABLE mercadopago_payments_clients TO authenticated;
+                GRANT SELECT ON TABLE mercadopago_payments_clients TO anon;`
+            },
+            {
+                name: 'mercadopago_acount_user',
+                sql: `CREATE TABLE IF NOT EXISTS mercadopago_acount_user (
+                    project_id TEXT,
+                    service_id TEXT,
+                    user_id TEXT,
+                    access_token TEXT,
+                    public_key TEXT,
+                    nickname TEXT,
+                    email TEXT,
+                    is_active BOOLEAN DEFAULT false,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+                    PRIMARY KEY (project_id, user_id)
+                );
+                GRANT ALL ON TABLE mercadopago_acount_user TO service_role;
+                GRANT ALL ON TABLE mercadopago_acount_user TO authenticated;
+                GRANT SELECT ON TABLE mercadopago_acount_user TO anon;`
+            },
+            {
+                name: 'mercadopago_user_routoing',
+                sql: `CREATE TABLE IF NOT EXISTS mercadopago_user_routoing (
+                    user_id TEXT PRIMARY KEY,
+                    project_id TEXT,
+                    project_url TEXT,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                GRANT ALL ON TABLE mercadopago_user_routoing TO service_role;
+                GRANT ALL ON TABLE mercadopago_user_routoing TO authenticated;
+                GRANT SELECT ON TABLE mercadopago_user_routoing TO anon;`
+            },
+            {
+                name: 'waba_report_groups',
+                sql: `CREATE TABLE IF NOT EXISTS waba_report_groups (
+                    id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    contacts JSONB DEFAULT '[]'::jsonb,
+                    jid TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                GRANT ALL ON TABLE waba_report_groups TO service_role;
+                GRANT ALL ON TABLE waba_report_groups TO authenticated;
+                GRANT SELECT ON TABLE waba_report_groups TO anon;`
+            },
+            {
+                name: 'quick_messages',
+                sql: `CREATE TABLE IF NOT EXISTS quick_messages (
+                    id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    service_id TEXT,
+                    title TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                GRANT ALL ON TABLE quick_messages TO service_role;
+                GRANT ALL ON TABLE quick_messages TO authenticated;
+                GRANT SELECT ON TABLE quick_messages TO anon;`
+            },
+            {
+                name: 'system_notifications',
+                sql: `CREATE TABLE IF NOT EXISTS system_notifications (
+                    id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    service_id TEXT,
+                    type TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    metadata JSONB DEFAULT '{}'::jsonb,
+                    read BOOLEAN DEFAULT false,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                GRANT ALL ON TABLE system_notifications TO service_role;
+                GRANT ALL ON TABLE system_notifications TO authenticated;
+                GRANT SELECT ON TABLE system_notifications TO anon;`
+            }
+        ];
+
+
+        for (const table of tables) {
+            console.log(`🔍 [HistoryHandler] Procesando tabla: ${table.name}`);
+            try {
+                // Verificar si la tabla existe
+                const { error: checkError } = await supabase.from(table.name).select('*').limit(1);
+
+                if (checkError && (checkError.code === '42P01' || checkError.code === 'PGRST204' || checkError.code === 'PGRST205')) {
+                    console.log(`⚠️ Tabla '${table.name}' no encontrada. Creándola...`);
+                    const { error: rpcError } = await supabase.rpc('exec_sql', { query: table.sql });
+
+                    if (rpcError) {
+                        console.error(`❌ Error al crear tabla '${table.name}':`, rpcError.message);
+                        if (rpcError.message.includes('function') && rpcError.message.includes('does not exist')) {
+                            console.error(`💡 TIP: Debes crear la función 'exec_sql' en el SQL Editor de Supabase.`);
+                        }
+                    } else {
+                        console.log(`✅ Tabla '${table.name}' creada exitosamente.`);
+                    }
+                } else if (checkError && checkError.code !== '42703') {
+                    console.error(`❌ Error verificando tabla '${table.name}':`, checkError.message);
+                } else {
+                    // Verificar columnas adicionales (Migración)
+                    const { error: columnError } = await supabase.from(table.name).select('project_id').limit(1);
+                    if (columnError && columnError.code === '42703') {
+                        console.log(`🔧 Actualizando tabla '${table.name}' para incluir project_id...`);
+                        const alterSql = table.name === 'chats'
+                            ? `ALTER TABLE chats ADD COLUMN IF NOT EXISTS project_id TEXT DEFAULT 'default_project'; 
+                               DO $$ 
+                               BEGIN 
+                                 IF EXISTS (SELECT 1 FROM information_schema.table_constraints WHERE constraint_name='chats_pkey') THEN
+                                   ALTER TABLE chats DROP CONSTRAINT chats_pkey; 
+                                 END IF;
+                               END $$;
+                               ALTER TABLE chats ADD PRIMARY KEY (id, project_id);`
+                            : `ALTER TABLE messages ADD COLUMN IF NOT EXISTS project_id TEXT DEFAULT 'default_project';`;
+
+                        const { error: alterError } = await supabase.rpc('exec_sql', { query: alterSql });
+                        if (alterError) {
+                            console.error(`❌ Error en migración de '${table.name}':`, alterError.message);
+                        } else {
+                            console.log(`✅ Tabla '${table.name}' migrada a multitenancy.`);
+                        }
+                    }
+
+                    // Migración para last_human_message_at y campos CRM
+                    if (table.name === 'chats') {
+                        // Migración para unread_count
+                        const { error: unreadCountErr } = await supabase.from('chats').select('unread_count').limit(1);
+                        if (unreadCountErr && unreadCountErr.code === '42703') {
+                            console.log(`🔧 Agregando columna unread_count a chats...`);
+                            await supabase.rpc('exec_sql', { query: `ALTER TABLE chats ADD COLUMN IF NOT EXISTS unread_count INTEGER DEFAULT 0;` });
+                        }
+
+                        const { error: humanMsgErr } = await supabase.from('chats').select('last_human_message_at').limit(1);
+                        if (humanMsgErr && humanMsgErr.code === '42703') {
+                            console.log(`🔧 Agregando columna last_human_message_at a chats...`);
+                            await supabase.rpc('exec_sql', { query: `ALTER TABLE chats ADD COLUMN last_human_message_at TIMESTAMPTZ;` });
+                        }
+
+                        // Verificar campos CRM
+                        const { error: crmErr } = await supabase.from('chats').select('notes, email, source, crm_status, crm_due_date').limit(1);
+                        if (crmErr && crmErr.code === '42703') {
+                            console.log(`🔧 Agregando columnas CRM a chats...`);
+                            await supabase.rpc('exec_sql', { query: `ALTER TABLE chats ADD COLUMN IF NOT EXISTS notes TEXT, ADD COLUMN IF NOT EXISTS email TEXT, ADD COLUMN IF NOT EXISTS source TEXT, ADD COLUMN IF NOT EXISTS crm_status TEXT, ADD COLUMN IF NOT EXISTS crm_due_date TIMESTAMPTZ, ADD COLUMN IF NOT EXISTS is_lead BOOLEAN DEFAULT false;` });
+                        }
+
+                        // Verificar campos adicionales CRM
+                        const { error: crmExtraErr } = await supabase.from('chats').select('cuit_dni, address, tax_status, offered_product').limit(1);
+                        if (crmExtraErr && crmExtraErr.code === '42703') {
+                            console.log(`🔧 Agregando columnas adicionales CRM a chats...`);
+                            await supabase.rpc('exec_sql', {
+                                query: `ALTER TABLE chats 
+                                        ADD COLUMN IF NOT EXISTS cuit_dni TEXT, 
+                                        ADD COLUMN IF NOT EXISTS address TEXT, 
+                                        ADD COLUMN IF NOT EXISTS tax_status TEXT, 
+                                        ADD COLUMN IF NOT EXISTS offered_product TEXT;`
+                            });
+                        }
+
+                        // Migración para user_id (Meta BSUID)
+                        const { error: bsuidErr } = await supabase.from('chats').select('user_id').limit(1);
+                        if (bsuidErr && bsuidErr.code === '42703') {
+                            console.log(`🔧 Agregando columna user_id (BSUID) a chats...`);
+                            await supabase.rpc('exec_sql', { query: `ALTER TABLE chats ADD COLUMN IF NOT EXISTS user_id TEXT;` });
+                        }
+
+                        // Migración para external_id en mensajes (Deduplicación)
+                        const { error: extIdErr } = await supabase.from('messages').select('external_id').limit(1);
+                        if (extIdErr && extIdErr.code === '42703') {
+                            console.log(`🔧 Agregando columna external_id a messages...`);
+                            await supabase.rpc('exec_sql', { query: `ALTER TABLE messages ADD COLUMN IF NOT EXISTS external_id TEXT;` });
+                            await supabase.rpc('exec_sql', { query: `CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_external_id ON messages (external_id);` });
+                        }
+
+                        // Migración para status en mensajes
+                        const { error: statusColErr } = await supabase.from('messages').select('status').limit(1);
+                        if (statusColErr && statusColErr.code === '42703') {
+                            console.log(`🔧 Agregando columna status a messages...`);
+                            await supabase.rpc('exec_sql', { query: `ALTER TABLE messages ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'sent';` });
+                        }
+
+                        // Migración para assigned_to
+                        const { error: assignedErr } = await supabase.from('chats').select('assigned_to').limit(1);
+                        if (assignedErr && assignedErr.code === '42703') {
+                            console.log(`🔧 Agregando columna assigned_to a chats...`);
+                            await supabase.rpc('exec_sql', { query: `ALTER TABLE chats ADD COLUMN IF NOT EXISTS assigned_to uuid REFERENCES users(id);` });
+                        }
+
+                        // Migración para last_db_result
+                        const { error: lastDbResultErr } = await supabase.from('chats').select('last_db_result').limit(1);
+                        if (lastDbResultErr && lastDbResultErr.code === '42703') {
+                            console.log(`🔧 Agregando columna last_db_result a chats...`);
+                            await supabase.rpc('exec_sql', { query: `ALTER TABLE chats ADD COLUMN IF NOT EXISTS last_db_result TEXT;` });
+                        }
+                    }
+
+                    // Migración para chat_id, attachments y chats_adjuntos en tickets
+                    if (table.name === 'messages') {
+                        const { error: replyColsErr } = await supabase.from('messages').select('reply_to, reply_preview, raw_payload').limit(1);
+                        const missingReplyColumns = replyColsErr && (
+                            replyColsErr.code === '42703' ||
+                            replyColsErr.code === 'PGRST204' ||
+                            String(replyColsErr.message || '').includes('reply_to') ||
+                            String(replyColsErr.message || '').includes('reply_preview') ||
+                            String(replyColsErr.message || '').includes('raw_payload')
+                        );
+                        if (missingReplyColumns) {
+                            console.log(`Agregando columnas reply_to, reply_preview y raw_payload a messages...`);
+                            await supabase.rpc('exec_sql', {
+                                query: `ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to TEXT, ADD COLUMN IF NOT EXISTS reply_preview JSONB, ADD COLUMN IF NOT EXISTS raw_payload JSONB;`
+                            });
+                        }
+                    }
+
+                    if (table.name === 'tickets') {
+                        const { error: ticketChatIdErr } = await supabase.from('tickets').select('chat_id').limit(1);
+                        if (ticketChatIdErr && ticketChatIdErr.code === '42703') {
+                            console.log(`🔧 Agregando columna chat_id a tickets...`);
+                            await supabase.rpc('exec_sql', { query: `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS chat_id TEXT;` });
+                        }
+                        const { error: ticketAttachErr } = await supabase.from('tickets').select('attachments').limit(1);
+                        if (ticketAttachErr && ticketAttachErr.code === '42703') {
+                            console.log(`🔧 Agregando columnas attachments y chats_adjuntos a tickets...`);
+                            await supabase.rpc('exec_sql', { query: `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS attachments TEXT DEFAULT '[]', ADD COLUMN IF NOT EXISTS chats_adjuntos TEXT DEFAULT '[]';` });
+                        }
+                        const { error: ticketPrioridadErr } = await supabase.from('tickets').select('prioridad').limit(1);
+                        if (ticketPrioridadErr && ticketPrioridadErr.code === '42703') {
+                            console.log(`🔧 Agregando columna prioridad a tickets...`);
+                            await supabase.rpc('exec_sql', { query: `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS prioridad TEXT DEFAULT 'Media';` });
+                        }
+                        const { error: ticketTipoErr } = await supabase.from('tickets').select('tipo').limit(1);
+                        if (ticketTipoErr && ticketTipoErr.code === '42703') {
+                            console.log(`🔧 Agregando columna tipo a tickets...`);
+                            await supabase.rpc('exec_sql', { query: `ALTER TABLE tickets ADD COLUMN IF NOT EXISTS tipo TEXT DEFAULT 'Soporte';` });
+                        }
+                    }
+
+                    // Migración para owner_id en meta_onboarding
+                    if (table.name === 'meta_onboarding') {
+                        const { error: ownerErr } = await supabase.from('meta_onboarding').select('owner_id').limit(1);
+                        if (ownerErr && ownerErr.code === '42703') {
+                            console.log(`🔧 Agregando columna owner_id a meta_onboarding...`);
+                            await supabase.rpc('exec_sql', { query: `ALTER TABLE meta_onboarding ADD COLUMN IF NOT EXISTS owner_id uuid REFERENCES users(id);` });
+                        }
+                    }
+
+                    // Migración para jid en waba_report_groups
+                    if (table.name === 'waba_report_groups') {
+                        const { error: jidErr } = await supabase.from('waba_report_groups').select('jid').limit(1);
+                        if (jidErr && jidErr.code === '42703') {
+                            console.log(`🔧 Agregando columna jid a waba_report_groups...`);
+                            await supabase.rpc('exec_sql', { query: `ALTER TABLE waba_report_groups ADD COLUMN IF NOT EXISTS jid TEXT;` });
+                        }
+                    }
+
+                    // Migración para mercadopago_acount_user (Múltiples cuentas por proyecto)
+                    if (table.name === 'mercadopago_acount_user') {
+                        const { error: isActiveErr } = await supabase.from('mercadopago_acount_user').select('is_active').limit(1);
+                        if (isActiveErr && isActiveErr.code === '42703') {
+                            console.log(`🔧 Migrando tabla mercadopago_acount_user para soportar múltiples cuentas...`);
+                            const migrationSql = `
+                                ALTER TABLE mercadopago_acount_user ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT false;
+                                DO $$ 
+                                BEGIN 
+                                  IF EXISTS (SELECT 1 FROM information_schema.table_constraints WHERE constraint_name='mercadopago_acount_user_pkey') THEN
+                                    ALTER TABLE mercadopago_acount_user DROP CONSTRAINT mercadopago_acount_user_pkey; 
+                                  END IF;
+                                END $$;
+                                DO $$
+                                BEGIN
+                                  IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints WHERE constraint_name='mp_account_user_project_user_pkey') THEN
+                                    -- Asegurar clave primaria compuesta
+                                    ALTER TABLE mercadopago_acount_user ADD CONSTRAINT mp_account_user_project_user_pkey PRIMARY KEY (project_id, user_id);
+                                  END IF;
+                                EXCEPTION WHEN OTHERS THEN
+                                  NULL;
+                                END $$;
+                            `;
+                            await supabase.rpc('exec_sql', { query: migrationSql });
+                        }
+                    }
+
+                    console.log(`✅ Tabla '${table.name}' verificada.`);
+                }
+            } catch (fatalErr) {
+                console.error(`❌ Error fatal inicializando tabla '${table.name}':`, fatalErr);
+            }
+        }
+
+        // Crear índices críticos para optimizar I/O (Lectura rápida)
+        console.log('🔍 [HistoryHandler] Verificando índices críticos...');
+        try {
+            const indexingSql = `
+                CREATE INDEX IF NOT EXISTS idx_messages_chat_project_created ON messages (chat_id, project_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_chats_project_last_msg ON chats (project_id, last_message_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_whatsapp_sessions_lookup ON whatsapp_sessions (project_id, session_id, key_id);
+                CREATE INDEX IF NOT EXISTS idx_tickets_project_status_chat ON tickets (project_id, estado, chat_id);
+            `;
+            const { error: indexError } = await supabase.rpc('exec_sql', { query: indexingSql });
+            if (indexError) {
+                console.warn('⚠️ No se pudieron crear los índices automáticamente:', indexError.message);
+                console.warn('💡 Tip: Intenta ejecutarlos manualmente en el SQL Editor de Supabase si el problema persiste.');
+            } else {
+                console.log('✅ Índices de rendimiento verificados.');
+            }
+        } catch (err) {
+            console.error('❌ Error fatal creando índices:', err);
+        }
+
+        console.log('✅ [HistoryHandler] Inicialización completa.');
+        this.initialized = true;
+    }
+
+    /**
+     * Normaliza los IDs de chat para evitar duplicados entre Meta y Baileys
+     */
+    static normalizeId(id: string): string {
+        if (!id) return id;
+        // Eliminar sufijo de WhatsApp Business API tradicional si existe
+        let cleanId = id.replace(/@s\.whatsapp\.net$/, '');
+        cleanId = cleanId.replace(/@c\.us$/, '');
+        return cleanId;
+    }
+
+    /**
+     * Obtiene todas las variantes de JID y formatos posibles para un número de chat
+     * contemplando la discrepancia de Argentina (549 vs 54).
+     */
+    static getPossibleJids(rawChatId: string): string[] {
+        if (!rawChatId) return [];
+        const chatId = this.normalizeId(rawChatId);
+        const list = [chatId, `${chatId}@s.whatsapp.net`, `${chatId}@c.us`, rawChatId];
+
+        if (chatId.startsWith('54')) {
+            if (chatId.startsWith('549')) {
+                const altId = '54' + chatId.slice(3);
+                list.push(altId);
+                list.push(`${altId}@s.whatsapp.net`);
+                list.push(`${altId}@c.us`);
+            } else {
+                const altId = '549' + chatId.slice(2);
+                list.push(altId);
+                list.push(`${altId}@s.whatsapp.net`);
+                list.push(`${altId}@c.us`);
+            }
+        }
+
+        return Array.from(new Set(list)).filter(Boolean);
+    }
+
+    static async getClientContext(rawChatId: string): Promise<any | null> {
+        const chatId = this.normalizeId(rawChatId);
+        if (process.env.STORAGE_MODE === "local") {
+            const chat = await LocalHistoryStore.getChat(chatId, this.PROJECT_IDENTIFIER);
+            if (!chat) return null;
+            const meta = chat.metadata || {};
+            return {
+                nombre: chat.name || meta.nombre,
+                direccion: meta.direccion,
+                email: meta.email,
+                dni_cuit: meta.dni_cuit,
+                tax_status: meta.tax_status,
+                offered_product: meta.offered_product,
+                tipoCliente: meta.tipoCliente,
+                incidencias_ids: meta.incidencias_ids || []
+            };
+        }
+
+        try {
+            const chat = await this.getChat(chatId);
+            if (!chat) return null;
+
+            const meta = chat.metadata || {};
+            return {
+                nombre: chat.name || meta.nombre,
+                direccion: meta.direccion,
+                email: meta.email,
+                dni_cuit: meta.dni_cuit,
+                tax_status: meta.tax_status,
+                offered_product: meta.offered_product,
+                tipoCliente: meta.tipoCliente,
+                incidencias_ids: meta.incidencias_ids || []
+            };
+        } catch (err) {
+            return null;
+        }
+    }
+
+    static async saveClientContext(rawChatId: string, contextData: any) {
+        const chatId = this.normalizeId(rawChatId);
+
+        if (process.env.STORAGE_MODE === "local") {
+            const chat = await LocalHistoryStore.getChat(chatId, this.PROJECT_IDENTIFIER);
+            const currentMeta = chat?.metadata || {};
+            const updatedMeta = {
+                ...currentMeta,
+                nombre: contextData.nombre || currentMeta.nombre || chat?.name,
+                direccion: contextData.direccion || contextData.address || currentMeta.direccion,
+                email: contextData.email || currentMeta.email,
+                dni_cuit: contextData.numCliente || contextData.cuit_dni || currentMeta.dni_cuit,
+                tax_status: contextData.tax_status || currentMeta.tax_status,
+                offered_product: contextData.offered_product || currentMeta.offered_product,
+                tipoCliente: contextData.tipoCliente || contextData.tipo_cliente || currentMeta.tipoCliente,
+                incidencias_ids: contextData.incidencias_ids || currentMeta.incidencias_ids || []
+            };
+            const updatePayload: any = {
+                metadata: updatedMeta
+            };
+            if (contextData.nombre) {
+                updatePayload.name = contextData.nombre;
+            }
+            await LocalHistoryStore.updateContactDetails(chatId, updatePayload, this.PROJECT_IDENTIFIER);
+            return;
+        }
+
+        try {
+            const chat = await this.getChat(chatId);
+            const currentMeta = chat?.metadata || {};
+            const updatedMeta = {
+                ...currentMeta,
+                nombre: contextData.nombre || currentMeta.nombre || chat?.name,
+                direccion: contextData.direccion || contextData.address || currentMeta.direccion,
+                email: contextData.email || currentMeta.email,
+                dni_cuit: contextData.numCliente || contextData.cuit_dni || currentMeta.dni_cuit,
+                tax_status: contextData.tax_status || currentMeta.tax_status,
+                offered_product: contextData.offered_product || currentMeta.offered_product,
+                tipoCliente: contextData.tipoCliente || contextData.tipo_cliente || currentMeta.tipoCliente,
+                incidencias_ids: contextData.incidencias_ids || currentMeta.incidencias_ids || []
+            };
+
+            const updatePayload: any = {
+                metadata: updatedMeta
+            };
+            if (contextData.nombre) {
+                updatePayload.name = contextData.nombre;
+            }
+
+            this.invalidateChatCache(chatId, this.PROJECT_IDENTIFIER);
+
+            await supabase
+                .from('chats')
+                .update(updatePayload)
+                .eq('id', chatId)
+                .eq('project_id', this.PROJECT_IDENTIFIER);
+        } catch (err) {
+            console.error('[HistoryHandler] Error en saveClientContext:', err);
+        }
+    }
+
+    /**
+     * Obtiene los detalles completos de un chat, incluyendo etiquetas
+     */
+    static async getChat(rawChatId: string, forcedProjectId?: string, forcedServiceId?: string): Promise<any | null> {
+        const chatId = this.normalizeId(rawChatId);
+        const currentProjectId = forcedProjectId || this.PROJECT_IDENTIFIER;
+        const currentServiceId = forcedServiceId || this.SERVICE_IDENTIFIER;
+        if (process.env.STORAGE_MODE === "local") {
+            return LocalHistoryStore.getChat(chatId, currentProjectId);
+        }
+        const cacheKey = `${currentProjectId}:${currentServiceId}:${chatId}`;
+        const now = Date.now();
+
+        // 1. Intentar obtener desde cache en memoria
+        const cached = this.chatCache.get(cacheKey);
+        if (cached && (now - cached.timestamp < this.CHAT_CACHE_TTL_MS)) {
+            return cached.data;
+        }
+
+        try {
+            let query = supabase
+                .from('chats')
+                .select('*, chat_tags(tag_id, tags(*))')
+                .eq('id', chatId)
+                .eq('project_id', currentProjectId);
+
+            if (currentServiceId && currentServiceId !== 'default_service') {
+                query = query.eq('service_id', currentServiceId);
+            }
+
+            const { data, error } = await query.maybeSingle();
+
+            if (error) throw error;
+            if (data) {
+                data.tags = data.chat_tags ? data.chat_tags.map((ct: any) => ct.tags).filter((t: any) => t !== null) : [];
+            }
+
+            // 2. Guardar en cache antes de retornar
+            this.chatCache.set(cacheKey, { data, timestamp: now });
+            return data;
+        } catch (err) {
+            console.error('[HistoryHandler] Error en getChat:', err);
+            return null;
+        }
+    }
+
+    /**
+     * Actualiza el último resultado de base de datos para un chat
+     */
+    static async updateLastDbResult(rawChatId: string, result: string, forcedProjectId?: string, forcedServiceId?: string | null): Promise<boolean> {
+        const chatId = this.normalizeId(rawChatId);
+        const currentProjectId = forcedProjectId || this.PROJECT_IDENTIFIER;
+        const currentServiceId = forcedServiceId || this.SERVICE_IDENTIFIER;
+        if (process.env.STORAGE_MODE === "local") {
+            return LocalHistoryStore.updateLastDbResult(chatId, result, currentProjectId);
+        }
+
+        // Invalidar cache del chat
+        this.invalidateChatCache(chatId, currentProjectId);
+
+        try {
+            let query = supabase
+                .from('chats')
+                .update({ last_db_result: result })
+                .eq('id', chatId)
+                .eq('project_id', currentProjectId);
+
+            if (isScopedServiceId(currentServiceId)) {
+                query = query.eq('service_id', currentServiceId);
+            }
+
+            const { error } = await query;
+            if (error) {
+                console.error("[HistoryHandler] Error actualizando last_db_result en chats:", error.message);
+                return false;
+            }
+            return true;
+        } catch (err: any) {
+            console.error('[HistoryHandler] Excepción en updateLastDbResult:', err.message);
+            return false;
+        }
+    }
+
+    /**
+     * Obtiene o crea un chat en un proyecto específico
+     * @param rawChatId - ID del chat (ej: número de teléfono)
+     * @param type - Tipo de chat
+     * @param name - Nombre del contacto
+     * @param userId - El nuevo BSUID (Business-Scoped User ID) de Meta
+     * @param forcedProjectId - ID opcional del proyecto para forzar el ruteo
+     */
+    static async getOrCreateChat(
+        rawChatId: string,
+        type: 'whatsapp' | 'webchat' | 'instagram' | 'messenger',
+        name: string | null = null,
+        userId: string | null = null,
+        forcedProjectId?: string,
+        forcedServiceId?: string | null
+    ): Promise<Chat | null> {
+        const chatId = this.normalizeId(rawChatId);
+        const currentProjectId = forcedProjectId || this.PROJECT_IDENTIFIER;
+        const currentServiceId = forcedServiceId || this.SERVICE_IDENTIFIER;
+        if (process.env.STORAGE_MODE === "local") {
+            return LocalHistoryStore.getOrCreateChat(chatId, type, name, userId, currentProjectId) as any;
+        }
+        if (name === '[-]') name = null;
+
+        try {
+            let data: Chat | null = null;
+            let error: any = null;
+
+            // 1. Intentar buscar por user_id (BSUID) si está presente
+            if (userId) {
+                let query = supabase
+                    .from('chats')
+                    .select('*')
+                    .eq('user_id', userId)
+                    .eq('project_id', currentProjectId);
+
+                if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                    query = query.eq('service_id', currentServiceId);
+                }
+
+                const { data: byUserId, error: errUser } = await query.maybeSingle();
+
+                data = byUserId;
+                if (errUser) error = errUser;
+            }
+
+            // 2. Si no se encontró por BSUID, intentar por chatId (Phone)
+            if (!data && !error) {
+                let query = supabase
+                    .from('chats')
+                    .select('*')
+                    .eq('id', chatId)
+                    .eq('project_id', currentProjectId);
+
+                if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                    query = query.eq('service_id', currentServiceId);
+                }
+
+                const { data: byChatId, error: errChat } = await query.maybeSingle();
+
+                data = byChatId;
+                error = errChat;
+
+                // Si lo encontramos por Phone pero no tiene el user_id (BSUID) guardado, lo actualizamos
+                if (data && userId && !data.user_id) {
+                    console.log(`[HistoryHandler] 🔗 Mapeando BSUID ${userId} al chat existente ${chatId}`);
+                    this.invalidateChatCache(chatId, currentProjectId);
+                    let updateQuery = supabase.from('chats')
+                        .update({ user_id: userId })
+                        .eq('id', chatId)
+                        .eq('project_id', currentProjectId);
+
+                    if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                        updateQuery = updateQuery.eq('service_id', currentServiceId);
+                    }
+
+                    await updateQuery;
+                    data.user_id = userId;
+                }
+            }
+
+            // 3. Si sigue sin existir, lo creamos
+            if (!data) {
+                this.invalidateChatCache(chatId, currentProjectId);
+                const isBlacklisted = await this.isContactBlacklisted(chatId, currentProjectId, currentServiceId);
+                const insertData: any = {
+                    id: chatId,
+                    user_id: userId,
+                    project_id: currentProjectId,
+                    type,
+                    name,
+                    bot_enabled: !isBlacklisted,
+                    assigned_agent: 'asistente1',
+                    last_message_at: new Date().toISOString()
+                };
+                if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                    insertData.service_id = currentServiceId;
+                } else {
+                    insertData.service_id = HistoryHandler.SERVICE_IDENTIFIER;
+                }
+
+                const { data: newData, error: insertError } = await supabase
+                    .from('chats')
+                    .insert(insertData)
+                    .select()
+                    .single();
+
+                if (insertError) throw insertError;
+                return newData;
+            }
+
+            if (error) throw error;
+
+            // Actualizar nombre si es null y ahora tenemos uno
+            if (name && !data.name) {
+                this.invalidateChatCache(chatId, currentProjectId);
+                let updateQuery = supabase.from('chats')
+                    .update({ name })
+                    .eq('id', chatId)
+                    .eq('project_id', currentProjectId);
+
+                if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                    updateQuery = updateQuery.eq('service_id', currentServiceId);
+                }
+
+                await updateQuery;
+            }
+
+            return data;
+        } catch (err) {
+            console.error('[HistoryHandler] Error en getOrCreateChat:', err);
+            return null;
+        }
+    }
+
+    /**
+     * Guarda un mensaje en la base de datos
+     */
+    static async saveMessage(rawChatId: string, role: 'user' | 'assistant' | 'system', content: string, type: string = 'text', contactName: string | null = null, userId: string | null = null, external_id: string | null = null, platformType?: 'whatsapp' | 'webchat' | 'instagram' | 'messenger', forcedProjectId?: string, forcedServiceId?: string, rawPayload?: any, status?: string) {
+        const chatId = this.normalizeId(rawChatId);
+        const currentProjectId = forcedProjectId || this.PROJECT_IDENTIFIER;
+        const currentServiceId = forcedServiceId || this.SERVICE_IDENTIFIER;
+        const messageStatus = status || 'sent';
+
+        // Registrar en cache si es respuesta del bot/operador para evitar falsas intervenciones manuales
+        if (role === 'assistant' && content) {
+            const normalized = normalizeTextForCache(content);
+            recentBotSentMessages.add(normalized);
+            setTimeout(() => {
+                recentBotSentMessages.delete(normalized);
+            }, 30000); // 30 segundos es tiempo de sobra para recibir el eco del socket
+
+            // También registrar los chunks individuales si el mensaje se envía fragmentado (por ejemplo, separado por dos o más saltos de línea)
+            const chunks = content.split(/\n\n+/);
+            if (chunks.length > 1) {
+                for (const chunk of chunks) {
+                    const trimmed = chunk.trim();
+                    if (trimmed.length > 0) {
+                        const normalizedChunk = normalizeTextForCache(trimmed);
+                        recentBotSentMessages.add(normalizedChunk);
+                        setTimeout(() => {
+                            recentBotSentMessages.delete(normalizedChunk);
+                        }, 30000);
+                    }
+                }
+            }
+        }
+
+        if (process.env.STORAGE_MODE === "local") {
+            const msg = await LocalHistoryStore.saveMessage(chatId, role, content, type, contactName, userId, external_id, currentProjectId, currentServiceId, rawPayload, messageStatus);
+            historyEvents.emit('message_saved', { chatId, projectId: currentProjectId, role, content, type, status: messageStatus });
+            return [msg] as any;
+        }
+        if (contactName === '[-]') contactName = null;
+        try {
+            // Lógica de resolución de plataforma mejorada
+            let resolvedPlatform: 'whatsapp' | 'webchat' | 'instagram' | 'messenger' = platformType || 'whatsapp';
+
+            if (!platformType) {
+                if (chatId.includes('@')) {
+                    resolvedPlatform = 'whatsapp';
+                } else if (chatId.length > 15) {
+                    // IDs de Instagram/Messenger suelen ser más largos que números de teléfono
+                    resolvedPlatform = 'messenger';
+                } else {
+                    resolvedPlatform = 'whatsapp';
+                }
+            }
+
+            // Asegurar que el chat existe
+            const chatObj = await this.getOrCreateChat(chatId, resolvedPlatform, contactName, userId, currentProjectId, currentServiceId);
+
+            const msgData: any = {
+                chat_id: chatId,
+                project_id: currentProjectId,
+                role,
+                content,
+                type,
+                created_at: new Date().toISOString()
+            };
+            const fallbackRawPayload = (!rawPayload && external_id && resolvedPlatform === 'whatsapp')
+                ? {
+                    id: external_id,
+                    body: content,
+                    type,
+                    role,
+                    platform: resolvedPlatform,
+                    chatId,
+                    projectId: currentProjectId,
+                    serviceId: currentServiceId,
+                    capturedAt: msgData.created_at,
+                    source: 'historyHandlerFallback'
+                }
+                : rawPayload;
+            const rawReplyTo = fallbackRawPayload?.replyTo || fallbackRawPayload?.reply_to || fallbackRawPayload?.context?.id || fallbackRawPayload?.context?.message_id || null;
+            const rawReplyPreview = fallbackRawPayload?.replyPreview || fallbackRawPayload?.reply_preview || null;
+            const { replyTo, replyPreview } = await resolveReplyMetadata(chatId, currentProjectId, currentServiceId, rawReplyTo, rawReplyPreview, chatObj);
+            const enrichedRawPayload = fallbackRawPayload
+                ? {
+                    ...fallbackRawPayload,
+                    replyTo: rawReplyTo,
+                    reply_to: replyTo,
+                    replyPreview
+                }
+                : fallbackRawPayload;
+            const safeRawPayload = sanitizeJsonPayload(enrichedRawPayload);
+
+            // --- DEDUPLICACIÓN MULTI-ESTRATEGIA ---
+            // 1. Búsqueda exacta por external_id
+            if (external_id) {
+                msgData.external_id = external_id;
+                const { data: exactMatch, error: exactError } = await supabase
+                    .from('messages')
+                    .select('*')
+                    .eq('external_id', external_id)
+                    .maybeSingle();
+
+                if (!exactError && exactMatch) {
+                    if ((replyTo && !exactMatch.reply_to) || (replyPreview && !exactMatch.reply_preview) || (safeRawPayload && !exactMatch.raw_payload)) {
+                        const updatePayload: any = {};
+                        if (replyTo && !exactMatch.reply_to) updatePayload.reply_to = replyTo;
+                        if (replyPreview && !exactMatch.reply_preview) updatePayload.reply_preview = replyPreview;
+                        if (safeRawPayload && !exactMatch.raw_payload) updatePayload.raw_payload = safeRawPayload;
+                        const { data: updatedRows, error: updateError } = await supabase.from('messages').update(updatePayload).eq('id', exactMatch.id).select();
+                        if (updateError) {
+                            console.warn('[HistoryHandler] No se pudo enriquecer mensaje existente con reply/raw_payload:', updateError.message);
+                        }
+                        const updatedMsg = updatedRows?.[0] || { ...exactMatch, ...updatePayload };
+                        historyEvents.emit('new_message', {
+                            ...updatedMsg,
+                            chat_id: chatId,
+                            chatId,
+                            project_id: currentProjectId,
+                            projectId: currentProjectId,
+                            service_id: currentServiceId,
+                            serviceId: currentServiceId,
+                            rawPayload: updatedMsg.raw_payload
+                        });
+                    }
+                    return [exactMatch]; // Ya existe, retornamos sin emitir evento repetido
+                }
+            }
+
+            // 2. BUSQUEDA POR CONTENIDO + TIEMPO (Deduplicación Difusa)
+            // Esto evita duplicados cuando el sistema guarda el mensaje antes de enviarlo (ID nulo)
+            // y luego llega el webhook (ID real) o viceversa, lo cual es común en Meta Cloud API.
+            const thirtySecondsAgo = new Date(Date.now() - 30000).toISOString();
+
+            const { data: recentlySaved, error: searchError } = await supabase
+                .from('messages')
+                .select('id, external_id')
+                .eq('chat_id', chatId)
+                .eq('project_id', currentProjectId)
+                .eq('role', role)
+                .eq('content', content)
+                .gt('created_at', thirtySecondsAgo)
+                .order('created_at', { ascending: false })
+                .limit(1);
+
+            if (recentlySaved && recentlySaved.length > 0) {
+                const existing = recentlySaved[0];
+
+                // Si ambos tienen external_id y son diferentes, NO es un duplicado (son mensajes distintos con el mismo contenido)
+                if (existing.external_id && external_id && existing.external_id !== external_id) {
+                    // Continuar con la inserción normal
+                } else {
+                    const shouldEnrichExisting = (!existing.external_id && external_id) || !!replyTo || !!replyPreview || !!safeRawPayload;
+                    if (shouldEnrichExisting) {
+                        if (!existing.external_id && external_id) {
+                            console.log(`[HistoryHandler] 🔄 Vinculando ID externo a mensaje existente: ${existing.id} -> ${external_id}`);
+                        }
+                        const updatePayload: any = {};
+                        if (!existing.external_id && external_id) updatePayload.external_id = external_id;
+                        if (replyTo) updatePayload.reply_to = replyTo;
+                        if (replyPreview) updatePayload.reply_preview = replyPreview;
+                        if (safeRawPayload) updatePayload.raw_payload = safeRawPayload;
+                        if (Object.keys(updatePayload).length > 0) {
+                            const { data: updatedRows, error: updateError } = await supabase
+                                .from('messages')
+                                .update(updatePayload)
+                                .eq('id', existing.id)
+                                .select();
+                            if (updateError) {
+                                console.warn('[HistoryHandler] No se pudo enriquecer mensaje difuso con reply/raw_payload:', updateError.message);
+                            }
+                            const updatedMsg = updatedRows?.[0] || { ...existing, ...updatePayload, chat_id: chatId, role, content, type };
+                            historyEvents.emit('new_message', {
+                                ...updatedMsg,
+                                chat_id: chatId,
+                                chatId,
+                                project_id: currentProjectId,
+                                projectId: currentProjectId,
+                                service_id: currentServiceId,
+                                serviceId: currentServiceId,
+                                rawPayload: updatedMsg.raw_payload
+                            });
+                        }
+                    }
+                    return recentlySaved;
+                }
+            }
+
+            // 3. INSERCIÓN NORMAL (Si no se encontró duplicado)
+            const insertPayload = {
+                chat_id: chatId,
+                project_id: currentProjectId,
+                service_id: currentServiceId,
+                role,
+                content,
+                type,
+                external_id: external_id || null,
+                reply_to: replyTo,
+                reply_preview: replyPreview,
+                raw_payload: safeRawPayload,
+                created_at: msgData.created_at,
+                status: messageStatus
+            };
+            let { error: insertError, data: insertedMsg } = await supabase.from('messages').insert(insertPayload).select();
+
+            if (insertError && (
+                insertError.code === '42703' ||
+                insertError.code === 'PGRST204' ||
+                String(insertError.message || '').includes('reply_to') ||
+                String(insertError.message || '').includes('reply_preview') ||
+                String(insertError.message || '').includes('raw_payload')
+            )) {
+                await supabase.rpc('exec_sql', {
+                    query: `ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to TEXT, ADD COLUMN IF NOT EXISTS reply_preview JSONB, ADD COLUMN IF NOT EXISTS raw_payload JSONB;`
+                });
+                const retryResult = await supabase.from('messages').insert(insertPayload).select();
+                insertError = retryResult.error;
+                insertedMsg = retryResult.data;
+            }
+
+            if (insertError) {
+                // Manejar race conditions de inserción concurrente
+                if (insertError.code === '23505') {
+                    console.log(`[HistoryHandler] ⏩ Mensaje con external_id ${external_id} insertado concurrentemente.`);
+                    return null;
+                }
+                console.error('[HistoryHandler] Error en inserción de mensaje fallback:', insertError);
+            }
+
+            // Actualizar timestamp del último mensaje en el chat para el ordenamiento de la lista y el unread_count si es del usuario
+            const chatUpdate: any = { last_message_at: new Date().toISOString() };
+            if (role === 'user') {
+                const currentUnread = (chatObj as any)?.unread_count || 0;
+                chatUpdate.unread_count = currentUnread + 1;
+            }
+
+            let chatUpdateQuery = supabase
+                .from('chats')
+                .update(chatUpdate)
+                .eq('id', chatId)
+                .eq('project_id', currentProjectId);
+            if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                chatUpdateQuery = chatUpdateQuery.eq('service_id', currentServiceId);
+            }
+            await chatUpdateQuery;
+
+            this.invalidateChatCache(chatId, currentProjectId);
+
+            // Emitir evento para WebSockets (esto actualiza la UI en tiempo real)
+            const emittedMessage: any = insertedMsg?.[0] || {};
+            historyEvents.emit('new_message', {
+                ...emittedMessage,
+                chat_id: emittedMessage.chat_id || chatId,
+                chatId,
+                role,
+                content: emittedMessage.content || content,
+                type: emittedMessage.type || type,
+                created_at: emittedMessage.created_at || new Date().toISOString(),
+                external_id: emittedMessage.external_id || external_id || null,
+                status: emittedMessage.status || messageStatus,
+                reply_to: emittedMessage.reply_to || replyTo,
+                reply_preview: emittedMessage.reply_preview || replyPreview,
+                project_id: currentProjectId,
+                projectId: currentProjectId,
+                service_id: currentServiceId,
+                serviceId: currentServiceId,
+                raw_payload: emittedMessage.raw_payload || safeRawPayload,
+                rawPayload: emittedMessage.raw_payload || safeRawPayload
+            });
+
+        } catch (err) {
+            console.error('[HistoryHandler] Error en saveMessage:', err);
+        }
+    }
+
+    /**
+     * Actualiza el estado de un mensaje (ej. 'failed', 'delivered', 'read')
+     */
+    static async updateMessageStatus(externalId: string, status: string, projectId?: string): Promise<boolean> {
+        const currentProjectId = projectId || this.PROJECT_IDENTIFIER;
+        if (process.env.STORAGE_MODE === "local") {
+            return LocalHistoryStore.updateMessageStatus(externalId, status, currentProjectId);
+        }
+        try {
+            const { error } = await supabase
+                .from('messages')
+                .update({ status })
+                .eq('external_id', externalId)
+                .eq('project_id', currentProjectId);
+            if (error) throw error;
+            return true;
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en updateMessageStatus:', err.message);
+            return false;
+        }
+    }
+
+    /**
+     * Elimina un mensaje por su ID o ID externo de la base de datos
+     */
+    static async deleteMessage(messageId: string, rawChatId?: string, forcedProjectId?: string): Promise<boolean> {
+        const currentProjectId = forcedProjectId || this.PROJECT_IDENTIFIER;
+        if (process.env.STORAGE_MODE === "local") {
+            const success = await LocalHistoryStore.deleteMessage(messageId, currentProjectId);
+            if (success) {
+                historyEvents.emit('message_deleted', { messageId, projectId: currentProjectId, chatId: this.normalizeId(rawChatId || '') });
+            }
+            return success;
+        }
+
+        try {
+            // Eliminar de Supabase por id o external_id
+            const { data, error } = await supabase
+                .from('messages')
+                .delete()
+                .or(`id.eq.${messageId},external_id.eq.${messageId}`)
+                .eq('project_id', currentProjectId)
+                .select();
+
+            if (error) {
+                console.error('[HistoryHandler] Error eliminando mensaje:', error.message);
+                return false;
+            }
+
+            if (data && data.length > 0) {
+                const deletedMsg = data[0];
+                historyEvents.emit('message_deleted', {
+                    messageId: deletedMsg.id,
+                    externalId: deletedMsg.external_id,
+                    chatId: deletedMsg.chat_id,
+                    projectId: currentProjectId,
+                    serviceId: deletedMsg.service_id,
+                    service_id: deletedMsg.service_id
+                });
+                return true;
+            }
+            return false;
+        } catch (err: any) {
+            console.error('[HistoryHandler] Excepción en deleteMessage:', err.message);
+            return false;
+        }
+    }
+
+    /**
+     * Limpia todo el historial de mensajes para un contacto específico en un proyecto.
+     */
+    static async clearChatHistory(rawChatId: string, forcedProjectId?: string, forcedServiceId?: string | null): Promise<boolean> {
+        const chatId = this.normalizeId(rawChatId);
+        const currentProjectId = forcedProjectId || this.PROJECT_IDENTIFIER;
+        const currentServiceId = forcedServiceId || this.SERVICE_IDENTIFIER;
+        if (process.env.STORAGE_MODE === "local") {
+            const success = await LocalHistoryStore.clearChatHistory(chatId, currentProjectId);
+            if (success) {
+                historyEvents.emit('chat_history_cleared', { chatId, projectId: currentProjectId, serviceId: currentServiceId });
+            }
+            return success;
+        }
+
+        try {
+            // Eliminar todos los mensajes del chat en el proyecto actual
+            let deleteQuery = supabase
+                .from('messages')
+                .delete()
+                .eq('chat_id', chatId)
+                .eq('project_id', currentProjectId);
+
+            if (currentServiceId && currentServiceId !== 'default_service') {
+                deleteQuery = deleteQuery.eq('service_id', currentServiceId);
+            }
+
+            const { error } = await deleteQuery;
+
+            if (error) {
+                console.error('[HistoryHandler] Error al limpiar historial de chat:', error.message);
+                return false;
+            }
+
+            // También reiniciamos unread_count en la tabla chats
+            let chatUpdateQuery = supabase
+                .from('chats')
+                .update({ unread_count: 0 })
+                .eq('id', chatId)
+                .eq('project_id', currentProjectId);
+
+            if (currentServiceId && currentServiceId !== 'default_service') {
+                chatUpdateQuery = chatUpdateQuery.eq('service_id', currentServiceId);
+            }
+
+            await chatUpdateQuery;
+
+            this.invalidateChatCache(chatId, currentProjectId);
+
+            let chatDataQuery = supabase
+                .from('chats')
+                .select('service_id')
+                .eq('id', chatId)
+                .eq('project_id', currentProjectId);
+
+            if (currentServiceId && currentServiceId !== 'default_service') {
+                chatDataQuery = chatDataQuery.eq('service_id', currentServiceId);
+            }
+
+            const { data: chatData } = await chatDataQuery.maybeSingle();
+
+            historyEvents.emit('chat_history_cleared', {
+                chatId,
+                projectId: currentProjectId,
+                serviceId: chatData?.service_id || null,
+                service_id: chatData?.service_id || null
+            });
+            return true;
+        } catch (err: any) {
+            console.error('[HistoryHandler] Excepción en clearChatHistory:', err.message);
+            return false;
+        }
+    }
+
+    static async getAssignedAgent(rawChatId: string, forcedProjectId?: string, forcedServiceId?: string): Promise<string> {
+        try {
+            const chat = await this.getChat(rawChatId, forcedProjectId, forcedServiceId);
+            return chat && chat.assigned_agent ? chat.assigned_agent : 'asistente1';
+        } catch (err) {
+            console.error('[HistoryHandler] Error en getAssignedAgent:', err);
+            return 'asistente1';
+        }
+    }
+
+    static async setAssignedAgent(rawChatId: string, agentName: string, forcedProjectId?: string, forcedServiceId?: string) {
+        const chatId = this.normalizeId(rawChatId);
+        const currentProjectId = forcedProjectId || this.PROJECT_IDENTIFIER;
+        const currentServiceId = forcedServiceId || this.SERVICE_IDENTIFIER;
+
+        // Invalidar cache
+        this.invalidateChatCache(chatId, currentProjectId);
+
+        try {
+            const isBlacklisted = await this.isContactBlacklisted(chatId, currentProjectId, currentServiceId);
+            const targetBotEnabled = !isBlacklisted;
+            const updateObj: any = {
+                assigned_agent: agentName,
+                bot_enabled: targetBotEnabled
+            };
+            if (agentName === 'asistente1') {
+                updateObj.last_db_result = null;
+            }
+
+            let query = supabase
+                .from('chats')
+                .update(updateObj)
+                .eq('id', chatId)
+                .eq('project_id', currentProjectId);
+
+            if (currentServiceId && currentServiceId !== 'default_service') {
+                query = query.eq('service_id', currentServiceId);
+            }
+
+            await query;
+
+            // Emitir evento para refrescar la UI en tiempo real
+            historyEvents.emit('bot_toggled', {
+                chatId,
+                enabled: targetBotEnabled,
+                assigned_agent: agentName,
+                project_id: currentProjectId
+            });
+        } catch (err) {
+            console.error('[HistoryHandler] Error en setAssignedAgent:', err);
+        }
+    }
+
+    static async updateContactDetails(rawChatId: string, details: {
+        name?: string,
+        email?: string,
+        notes?: string,
+        source?: string,
+        is_lead?: boolean,
+        cuit_dni?: string,
+        tax_status?: string,
+        address?: string,
+        offered_product?: string,
+        crm_status?: string,
+        crm_due_date?: string | null,
+        metadata?: any,
+        ticket_title?: string,
+        ticket_description?: string
+    }, forcedProjectId?: string, forcedServiceId?: string | null) {
+        const chatId = this.normalizeId(rawChatId);
+        let currentProjectId = forcedProjectId;
+        const currentServiceId = forcedServiceId || this.SERVICE_IDENTIFIER;
+        const ticketDescription = (details as any).ticket_description;
+
+        const originalCrmStatus = details.crm_status;
+        const originalIsLead = details.is_lead;
+
+        if (details.crm_status === 'Cerrado') {
+            const isBlacklisted = await this.isContactBlacklisted(chatId, currentProjectId || HistoryHandler.PROJECT_IDENTIFIER, currentServiceId);
+            (details as any).assigned_agent = 'asistente1';
+            (details as any).bot_enabled = !isBlacklisted;
+            (details as any).last_db_result = null;
+            (details as any).is_lead = false;
+            (details as any).crm_status = null;
+        }
+
+        if (process.env.STORAGE_MODE === "local") {
+            const localDetails = { ...(details as any) };
+            delete localDetails.ticket_description;
+            const success = await LocalHistoryStore.updateContactDetails(chatId, localDetails, currentProjectId || HistoryHandler.PROJECT_IDENTIFIER);
+            if (success) {
+                historyEvents.emit('contact_updated', {
+                    chatId,
+                    project_id: currentProjectId || HistoryHandler.PROJECT_IDENTIFIER,
+                    details: localDetails
+                });
+                const tickets = LocalHistoryStore.getTicketsList(currentProjectId || HistoryHandler.PROJECT_IDENTIFIER);
+                const activeTicket = tickets.find(t => t.chat_id === chatId);
+                if (activeTicket) {
+                    historyEvents.emit('ticket_updated', { ...activeTicket, id: activeTicket.id, chat_id: chatId });
+                }
+            }
+            return { success };
+        }
+        if (details.name === '[-]') details.name = undefined;
+        const { ticket_title: ticketTitle, ticket_description: _ticketDescription, newPhone: rawNewPhone, phone: rawPhone, ...chatDetails } = details as any;
+        const targetNewPhone = rawNewPhone || rawPhone;
+        let updatedPhoneId: string | null = null;
+
+        try {
+            // Resolver el project_id real buscando el chat en base de datos si no fue provisto
+            if (!currentProjectId) {
+                const { data: chatData, error: lookupErr } = await supabase
+                    .from('chats')
+                    .select('project_id')
+                    .eq('id', chatId)
+                    .limit(1);
+                if (!lookupErr && chatData && chatData.length > 0) {
+                    currentProjectId = chatData[0].project_id;
+                } else {
+                    currentProjectId = this.PROJECT_IDENTIFIER;
+                }
+            }
+
+            // Si se especificó un nuevo teléfono de contacto, actualizar el ID del chat en la base de datos (con ON UPDATE CASCADE)
+            if (targetNewPhone && typeof targetNewPhone === 'string') {
+                let cleanPhone = targetNewPhone.replace(/\D/g, '').trim();
+                if (cleanPhone.startsWith('0')) cleanPhone = cleanPhone.slice(1);
+                if (cleanPhone.length === 10) cleanPhone = `549${cleanPhone}`;
+
+                if (cleanPhone && cleanPhone !== chatId) {
+                    console.log(`📌 [updateContactDetails] Actualizando teléfono de chat: ${chatId} -> ${cleanPhone} para el proyecto ${currentProjectId}`);
+                    const { error: phoneErr } = await supabase
+                        .from('chats')
+                        .update({ id: cleanPhone })
+                        .eq('id', chatId)
+                        .eq('project_id', currentProjectId);
+
+                    if (!phoneErr) {
+                        updatedPhoneId = cleanPhone;
+                    } else {
+                        console.error('❌ [updateContactDetails] Error actualizando ID de teléfono:', phoneErr.message);
+                    }
+                }
+            }
+
+            const activeId = updatedPhoneId || chatId;
+
+            // Invalidar cache
+            this.invalidateChatCache(activeId, currentProjectId);
+
+            if (Object.keys(chatDetails).length > 0) {
+                let query = supabase
+                    .from('chats')
+                    .update(chatDetails)
+                    .eq('id', activeId)
+                    .eq('project_id', currentProjectId);
+
+                if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                    query = query.eq('service_id', currentServiceId);
+                }
+
+                const { error } = await query;
+                if (error) throw error;
+            }
+
+            // --- SINCRONIZACIÓN DUAL DE INSTANCIAS (LID <-> Teléfono) ---
+            try {
+                const { data: currentChat } = await supabase
+                    .from('chats')
+                    .select('metadata')
+                    .eq('id', chatId)
+                    .eq('project_id', currentProjectId)
+                    .maybeSingle();
+
+                let companionId: string | null = null;
+                if (currentChat) {
+                    const metadata = currentChat.metadata || {};
+                    if (metadata.lid) {
+                        companionId = this.normalizeId(metadata.lid);
+                    } else if (metadata.phone_jid) {
+                        companionId = this.normalizeId(metadata.phone_jid);
+                    } else {
+                        const { data: phoneChat } = await supabase
+                            .from('chats')
+                            .select('id')
+                            .eq('project_id', currentProjectId)
+                            .eq('metadata->>lid', `${chatId}@lid`)
+                            .maybeSingle();
+                        if (phoneChat) companionId = phoneChat.id;
+                    }
+                }
+
+                if (companionId && companionId !== chatId) {
+                    const syncDetails = { ...chatDetails };
+                    delete syncDetails.metadata; // Preservar metadatos individuales
+                    if (Object.keys(syncDetails).length > 0) {
+                        this.invalidateChatCache(companionId, currentProjectId);
+                        let syncQuery = supabase
+                            .from('chats')
+                            .update(syncDetails)
+                            .eq('id', companionId)
+                            .eq('project_id', currentProjectId);
+
+                        if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                            syncQuery = syncQuery.eq('service_id', currentServiceId);
+                        }
+
+                        await syncQuery;
+                    }
+                }
+            } catch (syncErr: any) {
+                console.error(`[HistoryHandler] Error en sincronización dual LID/Teléfono:`, syncErr.message);
+            }
+
+            // Sincronizar ticket de lead
+            let ticketQuery = supabase
+                .from('tickets')
+                .select('id, estado')
+                .eq('chat_id', chatId)
+                .eq('project_id', currentProjectId)
+                .eq('tipo', 'Nuevo Lead')
+                .neq('estado', 'Cerrado');
+
+            if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                ticketQuery = ticketQuery.eq('service_id', currentServiceId);
+            }
+
+            const { data: existingTicket, error: lookupErr } = await ticketQuery;
+
+            if (!lookupErr && existingTicket && existingTicket.length > 0) {
+                const activeTicketId = existingTicket[0].id;
+                const ticketUpdatePayload: any = { updated_at: new Date().toISOString() };
+                if (ticketDescription !== undefined || details.notes !== undefined) {
+                    ticketUpdatePayload.descripcion = ticketDescription ?? details.notes;
+                }
+                if (originalCrmStatus) {
+                    ticketUpdatePayload.estado = originalCrmStatus;
+                }
+                if (ticketTitle !== undefined) {
+                    ticketUpdatePayload.titulo = ticketTitle;
+                }
+
+                let utQuery = supabase
+                    .from('tickets')
+                    .update(ticketUpdatePayload)
+                    .eq('id', activeTicketId)
+                    .eq('project_id', currentProjectId);
+
+                if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                    utQuery = utQuery.eq('service_id', currentServiceId);
+                }
+
+                const { error: updateTicketErr } = await utQuery;
+
+                if (!updateTicketErr) {
+                    historyEvents.emit('ticket_updated', {
+                        id: activeTicketId,
+                        chat_id: chatId,
+                        ...ticketUpdatePayload
+                    });
+                }
+            } else if (!lookupErr && (!existingTicket || existingTicket.length === 0) && (details.is_lead === true || originalIsLead === true)) {
+                console.log(`[HistoryHandler] 🎟️ Auto-creating ticket for lead: ${chatId}`);
+
+                let ccQuery = supabase
+                    .from('chats')
+                    .select('name')
+                    .eq('id', chatId)
+                    .eq('project_id', currentProjectId);
+
+                if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                    ccQuery = ccQuery.eq('service_id', currentServiceId);
+                }
+
+                const { data: chatData } = await ccQuery.maybeSingle();
+                const name = chatData?.name || details.name || chatId;
+
+                const { data: proyectoRow } = await supabase
+                    .from('proyectos_railway')
+                    .select('cliente_id')
+                    .eq('railway_project_id', currentProjectId)
+                    .maybeSingle();
+                const clienteId = (proyectoRow as any)?.cliente_id || null;
+
+                const initialStatus = originalCrmStatus || 'Abierto';
+
+                const insertData: any = {
+                    project_id: currentProjectId,
+                    chat_id: chatId,
+                    titulo: ticketTitle || `Lead: ${name}`,
+                    descripcion: ticketDescription ?? details.notes ?? 'Lead detectado automáticamente',
+                    estado: initialStatus,
+                    tipo: 'Nuevo Lead',
+                    prioridad: 'Media',
+                    created_at: new Date().toISOString(),
+                    ...(clienteId ? { cliente_id: clienteId } : {})
+                };
+                if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                    insertData.service_id = currentServiceId;
+                }
+
+                const { data: newTicket, error: ticketErr } = await supabase
+                    .from('tickets')
+                    .insert(insertData)
+                    .select()
+                    .single();
+
+                if (!ticketErr && newTicket) {
+                    historyEvents.emit('ticket_updated', { id: newTicket.id, chat_id: chatId, ...newTicket });
+                }
+            }
+
+            // Emitir evento para actualización en tiempo real en el Backoffice/CRM
+            historyEvents.emit('contact_updated', {
+                chatId,
+                project_id: currentProjectId,
+                details: chatDetails,
+                service_id: currentServiceId,
+                serviceId: currentServiceId
+            });
+
+            return { success: true, newPhone: updatedPhoneId || undefined };
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en updateContactDetails:', err);
+            return { success: false, error: err.message };
+        }
+    }
+
+    /**
+     * Asegura que un tag exista para un proyecto y devuelve su ID.
+     */
+    static async ensureTagExists(tagName: string, projectId: string): Promise<string | null> {
+        try {
+            // 1. Buscar si ya existe
+            const { data: existingTag } = await supabase
+                .from('tags')
+                .select('id')
+                .eq('project_id', projectId)
+                .eq('name', tagName)
+                .maybeSingle();
+
+            if (existingTag) return existingTag.id;
+
+            // 2. Si no existe, crearlo
+            const { data: newTag, error } = await supabase
+                .from('tags')
+                .insert({ project_id: projectId, service_id: HistoryHandler.SERVICE_IDENTIFIER, name: tagName })
+                .select('id')
+                .single();
+
+            if (error) throw error;
+            return newTag.id;
+        } catch (err) {
+            console.error(`❌ [HistoryHandler] Error en ensureTagExists (${tagName}):`, err);
+            return null;
+        }
+    }
+
+    /**
+     * Asigna una lista de etiquetas a un contacto, evitando duplicados.
+     */
+    static async assignTagsToContact(rawChatId: string, tagsList: string[], projectId: string) {
+        if (!tagsList || tagsList.length === 0) return;
+
+        const chatId = this.normalizeId(rawChatId);
+
+        // Invalidar cache
+        this.invalidateChatCache(chatId, projectId);
+
+        try {
+            for (const tagName of tagsList) {
+                const tagId = await this.ensureTagExists(tagName, projectId);
+                if (tagId) {
+                    // Intentar insertar en la tabla intermedia (join table)
+                    // Usamos upsert o simplemente insert ignorando errores de duplicado
+                    await supabase
+                        .from('chat_tags')
+                        .upsert({
+                            chat_id: chatId,
+                            tag_id: tagId,
+                            project_id: projectId,
+                            service_id: HistoryHandler.SERVICE_IDENTIFIER
+                        }, { onConflict: 'chat_id,tag_id,project_id' });
+                }
+            }
+            console.log(`🏷️ [HistoryHandler] ${tagsList.length} etiquetas procesadas para ${chatId}`);
+
+            // Emitir evento para refrescar UI
+            historyEvents.emit('contact_updated', {
+                chatId,
+                project_id: projectId,
+                tags: tagsList
+            });
+        } catch (err) {
+            console.error(`❌ [HistoryHandler] Error asignando etiquetas a ${chatId}:`, err);
+        }
+    }
+
+    /**
+     * Crea un lead manualmente desde la interfaz (sin necesidad de chat previo)
+     */
+    static async createNewLeadManual(chatId: string, details: any, projectId: string | null = null, serviceId: string | null = null) {
+        const currentProjectId = projectId || this.PROJECT_IDENTIFIER;
+        const currentServiceId = serviceId || this.SERVICE_IDENTIFIER;
+        try {
+            // Invalidar cache
+            this.invalidateChatCache(chatId, currentProjectId);
+
+            // 1. Crear o actualizar el chat (Lead)
+            const chatPayload: any = {
+                id: chatId,
+                project_id: currentProjectId,
+                type: details.type || 'whatsapp',
+                ...details,
+                is_lead: true,
+                last_message_at: new Date().toISOString()
+            };
+            if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                chatPayload.service_id = currentServiceId;
+            } else {
+                chatPayload.service_id = HistoryHandler.SERVICE_IDENTIFIER;
+            }
+
+            const { error: chatErr } = await supabase
+                .from('chats')
+                .upsert(chatPayload, { onConflict: 'id,project_id,service_id' });
+
+            if (chatErr) throw chatErr;
+
+            // 2. Crear un ticket inicial "NUEVO LEAD" para que aparezca en el CRM
+            const { data: proyectoRow } = await supabase
+                .from('proyectos_railway')
+                .select('cliente_id')
+                .eq('railway_project_id', currentProjectId)
+                .maybeSingle();
+
+            const clienteId = (proyectoRow as any)?.cliente_id || null;
+
+            const ticketPayload: any = {
+                project_id: currentProjectId,
+                chat_id: chatId,
+                titulo: `Lead: ${details.name || chatId}`,
+                descripcion: details.notes || 'Lead creado manualmente',
+                estado: 'Abierto',
+                tipo: 'Nuevo Lead',
+                created_at: new Date().toISOString(),
+                ...(clienteId ? { cliente_id: clienteId } : {})
+            };
+            if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                ticketPayload.service_id = currentServiceId;
+            }
+
+            const { data: ticket, error: ticketErr } = await supabase
+                .from('tickets')
+                .insert(ticketPayload)
+                .select()
+                .single();
+
+            if (ticketErr) throw ticketErr;
+
+            // Emitir eventos para refrescar backoffice y CRM en tiempo real
+            historyEvents.emit('ticket_updated', { chatId, ticket, service_id: currentServiceId, serviceId: currentServiceId });
+            historyEvents.emit('contact_updated', { chatId, project_id: currentProjectId, service_id: currentServiceId, serviceId: currentServiceId });
+
+            return { success: true, ticket };
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en createNewLeadManual:', err);
+            return { success: false, error: err.message };
+        }
+    }
+
+    /**
+     * Verifica si un contacto está en lista negra (sin_bot o bloqueado_crm)
+     */
+    static async isContactBlacklisted(rawChatId: string, projectId?: string | null, serviceId?: string | null): Promise<boolean> {
+        if (!supabase) return false;
+        try {
+            const currentProjectId = projectId || this.PROJECT_IDENTIFIER;
+            const currentServiceId = serviceId || this.SERVICE_IDENTIFIER;
+
+            const possibleIds = this.getPossibleJids(rawChatId);
+
+            let query = supabase
+                .from('blacklist')
+                .select('sin_bot, bloqueado_crm')
+                .in('chat_id', possibleIds)
+                .eq('project_id', currentProjectId)
+                .or('sin_bot.eq.true,bloqueado_crm.eq.true');
+
+            if (isScopedServiceId(currentServiceId)) {
+                query = query.or(`service_id.eq.${currentServiceId},service_id.is.null,service_id.eq.default,service_id.eq.default_service`);
+            }
+
+            const { data, error } = await query.limit(1);
+            if (error) {
+                console.warn('[HistoryHandler] Error consultando isContactBlacklisted:', error.message);
+                return false;
+            }
+
+            return !!(data && data.length > 0);
+        } catch (err: any) {
+            console.warn('[HistoryHandler] Excepción en isContactBlacklisted:', err?.message || err);
+            return false;
+        }
+    }
+
+    /**
+     * Verifica si el bot está habilitado para un usuario
+     */
+    static async isBotEnabled(rawChatId: string, projectId?: string | null, serviceId?: string | null): Promise<boolean> {
+        try {
+            const isBlocked = await this.isContactBlacklisted(rawChatId, projectId, serviceId);
+            if (isBlocked) {
+                return false;
+            }
+            const chat = await this.getChat(rawChatId, projectId || undefined, serviceId || undefined);
+            return chat ? (chat.bot_enabled !== false) : true;
+        } catch (err) {
+            console.error('[HistoryHandler] Error en isBotEnabled:', err);
+            return true;
+        }
+    }
+
+    /**
+     * Cambia el estado del bot (Intervención humana)
+     */
+    static async toggleBot(rawChatId: string, enabled: boolean, projectId: string | null = null, serviceId: string | null = null, isManualAppIntervention: boolean = false, force: boolean = false) {
+        const chatId = this.normalizeId(rawChatId);
+        const currentProjectId = projectId || this.PROJECT_IDENTIFIER;
+        const currentServiceId = serviceId || this.SERVICE_IDENTIFIER;
+
+        // Si se intenta habilitar el bot, verificar que el contacto no esté en lista negra (a menos que se fuerce explícitamente)
+        if (enabled === true && !force) {
+            const isBlocked = await this.isContactBlacklisted(chatId, currentProjectId, currentServiceId);
+            if (isBlocked) {
+                console.log(`[HistoryHandler] ⛔ Bloqueada activación de bot para ${chatId} en proyecto ${currentProjectId}: contacto en LISTA NEGRA.`);
+                return { success: false, error: 'Contacto en lista negra (Sin Bot / Bloqueado)' };
+            }
+        }
+
+        if (process.env.STORAGE_MODE === "local") {
+            const res = await LocalHistoryStore.toggleBot(chatId, enabled, currentProjectId);
+            historyEvents.emit('bot_toggled', { chatId, enabled, assigned_agent: 'asistente1', projectId: currentProjectId, serviceId: currentServiceId });
+            return { success: res };
+        }
+
+        // Invalidar cache
+        this.invalidateChatCache(chatId, currentProjectId);
+
+        try {
+            // Obtener el chat actual para ver su metadata antes de actualizar
+            const { data: currentChat } = await supabase
+                .from('chats')
+                .select('metadata')
+                .eq('id', chatId)
+                .eq('project_id', currentProjectId)
+                .maybeSingle();
+
+            const updateData: any = { bot_enabled: enabled };
+            if (enabled === false) {
+                updateData.last_human_message_at = new Date().toISOString();
+                if (isManualAppIntervention) {
+                    updateData.metadata = {
+                        ...(currentChat?.metadata || {}),
+                        manual_app_interacted: true,
+                        manual_app_interacted_at: new Date().toISOString()
+                    };
+                }
+            } else {
+                // BUGFIX: Cuando el bot se vuelve a activar, el agente asignado DEBE volver al recepcionista (asistente1)
+                updateData.assigned_agent = 'asistente1';
+
+                // Limpiar banderas de intervención manual desde la app al reactivar
+                if (currentChat?.metadata?.manual_app_interacted) {
+                    const newMetadata = { ...currentChat.metadata };
+                    delete newMetadata.manual_app_interacted;
+                    delete newMetadata.manual_app_interacted_at;
+                    updateData.metadata = newMetadata;
+                }
+            }
+
+            let query = supabase
+                .from('chats')
+                .update(updateData)
+                .eq('id', chatId)
+                .eq('project_id', currentProjectId);
+
+            if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                query = query.eq('service_id', currentServiceId);
+            }
+
+            const { error } = await query;
+
+            if (error) throw error;
+            // Emitir evento para WebSockets (ahora incluimos el agente y projectId para sincronización frontend)
+            historyEvents.emit('bot_toggled', {
+                chatId,
+                enabled,
+                assigned_agent: 'asistente1',
+                projectId: currentProjectId,
+                serviceId: currentServiceId,
+                service_id: currentServiceId
+            });
+
+            return { success: true };
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en toggleBot:', err);
+            return { success: false, error: err.message };
+        }
+    }
+
+    /**
+     * Actualiza la marca de tiempo de la última intervención humana
+     */
+    static async updateLastHumanMessage(rawChatId: string, projectId: string | null = null, serviceId: string | null = null) {
+        const chatId = this.normalizeId(rawChatId);
+        const currentProjectId = projectId || this.PROJECT_IDENTIFIER;
+        const currentServiceId = serviceId || this.SERVICE_IDENTIFIER;
+        if (process.env.STORAGE_MODE === "local") {
+            return LocalHistoryStore.updateLastHumanMessage(chatId, currentProjectId);
+        }
+
+        try {
+            let query = supabase
+                .from('chats')
+                .update({
+                    last_human_message_at: new Date().toISOString()
+                })
+                .eq('id', chatId)
+                .eq('project_id', currentProjectId);
+            if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                query = query.eq('service_id', currentServiceId);
+            }
+            const { error } = await query;
+
+            if (error) throw error;
+            return true;
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en updateLastHumanMessage:', err);
+            return false;
+        }
+    }
+
+    /**
+     * Lista todos los chats activos (con tags incluidos)
+     */
+    static async listChats(limit: number = 20, offset: number = 0, search?: string, tagId?: string, assignedTo?: string | null, platform?: string, projectId: string | null = null, serviceId?: string | null) {
+        const currentProjectId = projectId || this.PROJECT_IDENTIFIER;
+        if (process.env.STORAGE_MODE === "local") {
+            const res = await LocalHistoryStore.listChats(limit, offset, search, tagId, assignedTo, platform, currentProjectId);
+            return res.data;
+        }
+        for (let _attempt = 0; _attempt < 2; _attempt++) {
+            try {
+                let matchingChatIds: string[] | null = null;
+                if (tagId) {
+                    const { data: taggedEntries, error: tagErr } = await supabase
+                        .from('chat_tags')
+                        .select('chat_id')
+                        .eq('project_id', currentProjectId)
+                        .eq('tag_id', tagId);
+
+                    if (tagErr) throw tagErr;
+                    matchingChatIds = (taggedEntries || []).map((te: any) => te.chat_id);
+                    if (matchingChatIds.length === 0) {
+                        return [];
+                    }
+                }
+
+                const selectString = 'id, type, name, last_message_at, last_human_message_at, assigned_to, bot_enabled, crm_status, crm_due_date, notes, email, source, is_lead, cuit_dni, tax_status, address, offered_product, unread_count, chat_tags(tag_id, tags(*))';
+
+                let query = supabase
+                    .from('chats')
+                    .select(selectString);
+
+                // Filtrar por project_id y service_id para correcta segregación multi-servicio
+                query = query.eq('project_id', currentProjectId);
+                // Prefer explicitly passed serviceId, then fall back to process.env
+                const currentServiceId = serviceId || process.env.SERVICE_ID || process.env.RAILWAY_SERVICE_ID || this.SERVICE_IDENTIFIER;
+                if (currentServiceId && currentServiceId !== 'default_service') {
+                    if (currentServiceId.includes(',')) {
+                        const servicesList = currentServiceId.split(',').map(s => s.trim()).filter(Boolean);
+                        query = query.in('service_id', [...servicesList, 'default_service']);
+                    } else {
+                        query = query.or(`service_id.eq.${currentServiceId},service_id.eq.default_service,service_id.is.null`);
+                    }
+                }
+
+                if (matchingChatIds !== null) {
+                    query = query.in('id', matchingChatIds);
+                }
+
+                if (platform === 'leads') {
+                    // Filtramos por chats que tengan algún estado CRM o estén marcados como leads
+                    query = query.or('crm_status.not.is.null,is_lead.eq.true');
+                } else if (platform && platform !== 'all') {
+                    query = query.eq('type', platform);
+                }
+
+                // Filtro por asignación (si se solicita)
+                if (assignedTo) {
+                    // El subusuario ve lo suyo O lo que no tiene nadie asignado
+                    query = query.or(`assigned_to.eq.${assignedTo},assigned_to.is.null`);
+                }
+
+                if (search) {
+                    // Filtro optimizado: solo por nombre o ID (evitamos ILIKE en 'notes' que es pesado)
+                    query = query.or(`name.ilike.%${search}%,id.ilike.%${search}%`);
+                }
+
+                const { data, error } = await query
+                    .order('last_message_at', { ascending: false })
+                    .range(offset, offset + limit - 1);
+
+                if (error) throw error;
+
+                let finalChats = (data || []).map((chat: any) => ({
+                    ...chat,
+                    tags: chat.chat_tags ? chat.chat_tags.map((ct: any) => ct.tags).filter((t: any) => t !== null) : []
+                }));
+
+                // --- LÓGICA DE ANCLAJE (PINNED CHATS) ---
+                // Solo si estamos en la primera página (offset === 0) y no hay filtros o búsquedas activas
+                const hasNoFilters = !search && !tagId && (!platform || platform === 'all') && !assignedTo;
+
+                if (offset === 0 && hasNoFilters) {
+                    const groupResumenId = await this.getConfig('ID_GRUPO_RESUMEN') || '';
+                    const groupResumenId2 = await this.getConfig('ID_GRUPO_RESUMEN_2') || '';
+
+                    const groupIds = [groupResumenId, groupResumenId2]
+                        .map(id => this.normalizeId(id))
+                        .filter(id => id !== '');
+
+                    if (groupIds.length > 0) {
+                        const pinnedChats: any[] = [];
+                        const normalChats: any[] = [];
+
+                        finalChats.forEach(chat => {
+                            if (groupIds.includes(chat.id)) {
+                                pinnedChats.push(chat);
+                            } else {
+                                normalChats.push(chat);
+                            }
+                        });
+
+                        // Si algún grupo configurado existe en DB pero no estaba en la primera página, lo buscamos
+                        const missingGroupIds = groupIds.filter(id => !pinnedChats.some(pc => pc.id === id));
+
+                        if (missingGroupIds.length > 0) {
+                            const { data: missingGroups } = await supabase
+                                .from('chats')
+                                .select(selectString)
+                                .eq('project_id', this.PROJECT_IDENTIFIER)
+                                .in('id', missingGroupIds);
+
+                            if (missingGroups && missingGroups.length > 0) {
+                                missingGroups.forEach((g: any) => {
+                                    pinnedChats.push({
+                                        ...g,
+                                        tags: g.chat_tags ? g.chat_tags.map((ct: any) => ct.tags).filter((t: any) => t !== null) : [],
+                                        isPinned: true
+                                    });
+                                });
+                            }
+                        }
+
+                        pinnedChats.forEach(c => c.isPinned = true);
+
+                        // Re-ensamblar la lista: Pinned al principio, luego los normales
+                        finalChats = [...pinnedChats, ...normalChats];
+
+                        // Si al re-ensamblar nos pasamos del límite de la página, cortamos para no romper paginación
+                        if (finalChats.length > limit) {
+                            finalChats = finalChats.slice(0, limit);
+                        }
+                    }
+                }
+
+                // --- FILTRO LISTA NEGRA (bloqueado_crm) ---
+                // Si la integración está activa, ocultamos los chats bloqueados del CRM
+                try {
+                    const blacklistActive = await this.getSetting('BLACKLIST_ACTIVE');
+                    if (blacklistActive === 'true') {
+                        const { data: blockedEntries } = await supabase
+                            .from('blacklist')
+                            .select('chat_id')
+                            .eq('project_id', this.PROJECT_IDENTIFIER)
+                            .eq('bloqueado_crm', true);
+                        if (blockedEntries && blockedEntries.length > 0) {
+                            const blockedIds = new Set<string>();
+                            blockedEntries.forEach((e: any) => {
+                                const norm = this.normalizeId(e.chat_id);
+                                blockedIds.add(norm);
+                                blockedIds.add(e.chat_id);
+                                if (norm.startsWith('54')) {
+                                    if (norm.startsWith('549')) {
+                                        blockedIds.add('54' + norm.slice(3));
+                                    } else {
+                                        blockedIds.add('549' + norm.slice(2));
+                                    }
+                                }
+                            });
+                            finalChats = finalChats.filter((c: any) => {
+                                const normCId = this.normalizeId(c.id);
+                                return !blockedIds.has(normCId) && !blockedIds.has(c.id);
+                            });
+                        }
+                    }
+                } catch (blErr) {
+                    console.warn('[HistoryHandler] No se pudo aplicar filtro de lista negra:', blErr);
+                }
+
+                return finalChats;
+            } catch (err) {
+                const isTransient = err instanceof Error && (err.message.includes('fetch failed') || err.message.includes('UND_ERR_SOCKET'));
+                if (isTransient && _attempt === 0) {
+                    console.warn('[HistoryHandler] listChats: fetch transient error, retrying...');
+                    await new Promise(r => setTimeout(r, 600));
+                    continue;
+                }
+                console.error('[HistoryHandler] Error en listChats:', err);
+                return [];
+            }
+        } // end for
+        return [];
+    }
+
+
+
+    /**
+     * Obtiene los mensajes de un chat específico
+     */
+    static async getMessages(rawChatId: string, limit: number = 50, offset: number = 0, projectId: string | null = null, serviceId: string | null = null) {
+        const chatId = this.normalizeId(rawChatId);
+        const targetProjectId = projectId || HistoryHandler.PROJECT_IDENTIFIER;
+        const currentServiceId = serviceId || process.env.SERVICE_ID || process.env.RAILWAY_SERVICE_ID || this.SERVICE_IDENTIFIER;
+        if (process.env.STORAGE_MODE === "local") {
+            const msgs = await LocalHistoryStore.getMessages(chatId, limit, offset, targetProjectId, currentServiceId);
+            return msgs.reverse();
+        }
+        try {
+            let query = supabase
+                .from('messages')
+                .select('*')
+                .in('chat_id', [chatId, `${chatId}@s.whatsapp.net`, `${chatId}@c.us`])
+                .eq('project_id', targetProjectId);
+
+            if (currentServiceId && currentServiceId !== 'default_service') {
+                if (currentServiceId.includes(',')) {
+                    const servicesList = currentServiceId.split(',').map(s => s.trim()).filter(Boolean);
+                    query = query.in('service_id', servicesList);
+                } else {
+                    query = query.eq('service_id', currentServiceId);
+                }
+            }
+
+            const { data, error } = await query
+                .order('created_at', { ascending: false })
+                .range(offset, offset + limit - 1);
+
+            if (error) throw error;
+            return (data || []).reverse();
+        } catch (err) {
+            console.error('[HistoryHandler] Error en getMessages:', err);
+            return [];
+        }
+    }
+
+    // --- Tag Management ---
+
+    static async getTags(projectId: string | null = null, serviceId: string | null = null) {
+        const currentProjectId = projectId || this.PROJECT_IDENTIFIER;
+        const currentServiceId = serviceId || this.SERVICE_IDENTIFIER;
+        if (process.env.STORAGE_MODE === "local") {
+            return LocalHistoryStore.getTags(currentProjectId);
+        }
+        if (!supabase) return [];
+        try {
+            let query = supabase
+                .from('tags')
+                .select('*')
+                .eq('project_id', currentProjectId);
+
+            if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                query = query.eq('service_id', currentServiceId);
+            }
+
+            const { data, error } = await query.order('name');
+            if (error) throw error;
+            return data || [];
+        } catch (err) {
+            console.error('[HistoryHandler] Error en getTags:', err);
+            return [];
+        }
+    }
+
+    static async createTag(name: string, color: string = '#6366f1', projectId: string | null = null, serviceId: string | null = null) {
+        const currentProjectId = projectId || this.PROJECT_IDENTIFIER;
+        const currentServiceId = serviceId || this.SERVICE_IDENTIFIER;
+        if (process.env.STORAGE_MODE === "local") {
+            const tag = await LocalHistoryStore.createTag(name, color, currentProjectId);
+            return { success: true, tag };
+        }
+        if (!supabase) return { success: false, error: 'Supabase not initialized' };
+        try {
+            const insertData: any = {
+                name,
+                color,
+                project_id: currentProjectId,
+                created_at: new Date().toISOString()
+            };
+            if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                insertData.service_id = currentServiceId;
+            }
+
+            const { data, error } = await supabase
+                .from('tags')
+                .insert(insertData)
+                .select()
+                .single();
+            if (error) throw error;
+            return { success: true, tag: data };
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en createTag:', err);
+            return { success: false, error: err.message };
+        }
+    }
+
+    static async updateTag(id: string, name: string, color: string, projectId: string | null = null, serviceId: string | null = null) {
+        const currentProjectId = projectId || this.PROJECT_IDENTIFIER;
+        const currentServiceId = serviceId || this.SERVICE_IDENTIFIER;
+        if (process.env.STORAGE_MODE === "local") {
+            const res = await LocalHistoryStore.updateTag(id, name, color, currentProjectId);
+            return { success: res };
+        }
+        try {
+            let query = supabase
+                .from('tags')
+                .update({ name, color })
+                .eq('id', id)
+                .eq('project_id', currentProjectId);
+
+            if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                query = query.eq('service_id', currentServiceId);
+            }
+
+            const { error } = await query;
+            if (error) throw error;
+            return { success: true };
+        } catch (err: any) {
+            return { success: false, error: err.message };
+        }
+    }
+
+    static async deleteTag(id: string, projectId: string | null = null, serviceId: string | null = null) {
+        const currentProjectId = projectId || this.PROJECT_IDENTIFIER;
+        const currentServiceId = serviceId || this.SERVICE_IDENTIFIER;
+        if (process.env.STORAGE_MODE === "local") {
+            const res = await LocalHistoryStore.deleteTag(id, currentProjectId);
+            return { success: res };
+        }
+        try {
+            let query = supabase
+                .from('tags')
+                .delete()
+                .eq('id', id)
+                .eq('project_id', currentProjectId);
+
+            if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                query = query.eq('service_id', currentServiceId);
+            }
+
+            const { error } = await query;
+            if (error) throw error;
+            return { success: true };
+        } catch (err: any) {
+            return { success: false, error: err.message };
+        }
+    }
+
+    static async addTagToChat(rawChatId: string, tagId: string, projectId: string | null = null, serviceId: string | null = null) {
+        const chatId = this.normalizeId(rawChatId);
+        const currentProjectId = projectId || this.PROJECT_IDENTIFIER;
+        const currentServiceId = serviceId || this.SERVICE_IDENTIFIER;
+        if (process.env.STORAGE_MODE === "local") {
+            const res = await LocalHistoryStore.addTagToChat(chatId, tagId, currentProjectId);
+            return { success: res };
+        }
+        try {
+            // Invalidar cache
+            this.invalidateChatCache(chatId, currentProjectId);
+
+            // Aseguramos que el chat base existe antes de vincular la etiqueta
+            // para evitar fallos de clave foránea si el chat no ha sido persistido aún.
+            await this.getOrCreateChat(chatId, 'whatsapp', null, null, currentProjectId, currentServiceId);
+
+            const insertData: any = {
+                chat_id: chatId,
+                tag_id: tagId,
+                project_id: currentProjectId
+            };
+            if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                insertData.service_id = currentServiceId;
+            }
+
+            const { error } = await supabase
+                .from('chat_tags')
+                .insert(insertData);
+
+            if (error) {
+                if (error.code === '23505') return { success: true }; // Ya existe
+                throw error;
+            }
+            return { success: true };
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en addTagToChat:', err);
+            return { success: false, error: err.message };
+        }
+    }
+
+    static async removeTagFromChat(rawChatId: string, tagId: string, projectId: string | null = null, serviceId: string | null = null) {
+        const chatId = this.normalizeId(rawChatId);
+        const currentProjectId = projectId || this.PROJECT_IDENTIFIER;
+        const currentServiceId = serviceId || this.SERVICE_IDENTIFIER;
+        if (process.env.STORAGE_MODE === "local") {
+            const res = await LocalHistoryStore.removeTagFromChat(chatId, tagId, currentProjectId);
+            return { success: res };
+        }
+        try {
+            // Invalidar cache
+            this.invalidateChatCache(chatId, currentProjectId);
+
+            let query = supabase
+                .from('chat_tags')
+                .delete()
+                .eq('chat_id', chatId)
+                .eq('tag_id', tagId)
+                .eq('project_id', currentProjectId);
+
+            if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                query = query.eq('service_id', currentServiceId);
+            }
+
+            const { error } = await query;
+            if (error) throw error;
+            return { success: true };
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en removeTagFromChat:', err);
+            return { success: false, error: err.message };
+        }
+    }
+
+    static async getChatTags(rawChatId: string) {
+        try {
+            const chat = await this.getChat(rawChatId);
+            return chat && chat.tags ? chat.tags : [];
+        } catch (err) {
+            console.error('[HistoryHandler] Error en getChatTags:', err);
+            return [];
+        }
+    }
+
+
+
+    static async saveThreadId(chatId: string, threadId: string, forcedProjectId?: string) {
+        const currentProjectId = forcedProjectId || this.PROJECT_IDENTIFIER;
+
+        // Invalidar cache
+        this.invalidateChatCache(chatId, currentProjectId);
+
+        try {
+            // Primero obtenemos metadata actual
+            const { data } = await supabase
+                .from('chats')
+                .select('metadata')
+                .eq('id', chatId)
+                .eq('project_id', currentProjectId)
+                .maybeSingle();
+
+            const currentMetadata = data?.metadata || {};
+            const updatedMetadata = { ...currentMetadata, thread_id: threadId };
+
+            await supabase
+                .from('chats')
+                .update({ metadata: updatedMetadata })
+                .eq('id', chatId)
+                .eq('project_id', currentProjectId);
+        } catch (err) {
+            console.error('[HistoryHandler] Error en saveThreadId:', err);
+        }
+    }
+
+    /**
+     * Obtiene el thread_id de OpenAI del metadata del chat
+     */
+    static async getThreadId(chatId: string, forcedProjectId?: string): Promise<string | null> {
+        try {
+            const chat = await this.getChat(chatId, forcedProjectId);
+            return chat?.metadata?.thread_id || null;
+        } catch (err) {
+            console.error('[HistoryHandler] Error en getThreadId:', err);
+            return null;
+        }
+    }
+
+    /**
+    * Crea un nuevo ticket
+    */
+    static async createTicket(
+        rawChatId: string | null,
+        titulo: string,
+        descripcion: string,
+        tipo: string = 'Soporte',
+        prioridad: string = 'Media',
+        forcedProjectId?: string,
+        attachments: string[] = [],
+        chats_adjuntos: { chat_id: string; name: string }[] = [],
+        serviceId?: string | null
+    ) {
+        const chatId = rawChatId ? this.normalizeId(rawChatId) : null;
+        const currentProjectId = forcedProjectId || this.PROJECT_IDENTIFIER;
+        if (process.env.STORAGE_MODE === "local") {
+            const ticket = await LocalHistoryStore.createTicket(chatId || '', titulo, descripcion, tipo, prioridad, currentProjectId, attachments, chats_adjuntos, serviceId);
+            historyEvents.emit('ticket_updated', { ticket });
+            return { success: true, ticket };
+        }
+        try {
+            const { data: proyectoRow } = await supabase
+                .from('proyectos_railway')
+                .select('cliente_id')
+                .eq('railway_project_id', currentProjectId)
+                .maybeSingle();
+            const clienteId = proyectoRow?.cliente_id || null;
+
+            const { data, error } = await supabase
+                .from('tickets')
+                .insert({
+                    project_id: currentProjectId,
+                    service_id: serviceId || process.env.SERVICE_ID || process.env.RAILWAY_SERVICE_ID || this.SERVICE_IDENTIFIER || "default_service",
+                    chat_id: chatId,
+                    titulo,
+                    descripcion,
+                    prioridad,
+                    estado: 'Abierto',
+                    tipo: tipo,
+                    attachments: JSON.stringify(attachments),
+                    chats_adjuntos: JSON.stringify(chats_adjuntos),
+                    ...(clienteId ? { cliente_id: clienteId } : {})
+                })
+                .select()
+                .single();
+
+            if (error) throw error;
+            historyEvents.emit('ticket_updated', { ticket: data });
+            return { success: true, ticket: data };
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en createTicket:', err);
+            return { success: false, error: err.message };
+        }
+    }
+
+    /**
+     * Obtiene el conteo de tickets pendientes (Abiertos o En progreso)
+     */
+    static async getPendingTicketsCount(projectId?: string | null, tipo?: string) {
+        const currentProjectId = projectId || this.PROJECT_IDENTIFIER;
+        if (process.env.STORAGE_MODE === "local") {
+            return LocalHistoryStore.getPendingTicketsCount(tipo || '', currentProjectId);
+        }
+        try {
+            let query = supabase
+                .from('tickets')
+                .select('*', { count: 'exact', head: true })
+                .eq('project_id', currentProjectId)
+                .in('estado', ['Abierto', 'En progreso']);
+
+            if (tipo) {
+                query = query.eq('tipo', tipo);
+            }
+
+            const { count, error } = await query;
+            if (error) throw error;
+            return count || 0;
+        } catch (err) {
+            console.error('[HistoryHandler] Error en getPendingTicketsCount:', err);
+            return 0;
+        }
+    }
+
+    /**
+     * Obtiene el ticket activo (no Cerrado) para un contacto específico
+     */
+    static async createReporteBot(
+        rawChatId: string,
+        descripcion: string,
+        tipo: string = 'Nuevo Lead',
+        forcedProjectId?: string
+    ) {
+        const chatId = this.normalizeId(rawChatId);
+        const currentProjectId = forcedProjectId || this.PROJECT_IDENTIFIER;
+        try {
+            const { data: proyectoRow } = await supabase
+                .from('proyectos_railway')
+                .select('cliente_id')
+                .eq('railway_project_id', currentProjectId)
+                .maybeSingle();
+
+            const clienteId = (proyectoRow as any)?.cliente_id || null;
+
+            // Obtener el nombre real del contacto desde la tabla chats
+            const { data: chatData } = await supabase
+                .from('chats')
+                .select('name')
+                .eq('id', chatId)
+                .eq('project_id', currentProjectId)
+                .maybeSingle();
+            const contactName = chatData?.name || chatId;
+
+            const { data, error } = await supabase
+                .from('tickets')
+                .insert({
+                    project_id: currentProjectId,
+                    chat_id: chatId,
+                    titulo: `Lead: ${contactName}`,
+                    descripcion,
+                    tipo,
+                    estado: 'Abierto',
+                    prioridad: 'Media',
+                    attachments: '[]',
+                    chats_adjuntos: '[]',
+                    created_at: new Date().toISOString(),
+                    ...(clienteId ? { cliente_id: clienteId } : {})
+                })
+                .select()
+                .single();
+
+            if (error) throw error;
+            return { success: true, reporte: data };
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en createReporteBot:', err);
+            return { success: false, error: err.message };
+        }
+    }
+
+    static async getActiveReporteBot(rawChatId: string, forcedProjectId?: string) {
+        const chatId = this.normalizeId(rawChatId);
+        const currentProjectId = forcedProjectId || this.PROJECT_IDENTIFIER;
+        try {
+            const { data, error } = await supabase
+                .from('tickets')
+                .select('*')
+                .eq('chat_id', chatId)
+                .eq('project_id', currentProjectId)
+                .eq('tipo', 'Nuevo Lead')
+                .eq('estado', 'Abierto')
+                .order('created_at', { ascending: false })
+                .limit(1)
+                .maybeSingle();
+
+            if (error) throw error;
+            return data || null;
+        } catch (err) {
+            console.error('[HistoryHandler] Error en getActiveReporteBot:', err);
+            return null;
+        }
+    }
+
+    static async updateReporteBotDescription(reporteId: string, descripcion: string) {
+        try {
+            const { data, error } = await supabase
+                .from('tickets')
+                .update({ descripcion, updated_at: new Date().toISOString() })
+                .eq('id', reporteId)
+                .select()
+                .single();
+
+            if (error) throw error;
+            return { success: true, reporte: data };
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en updateReporteBotDescription:', err);
+            return { success: false, error: err.message };
+        }
+    }
+
+    /**
+     * Lista los tickets del proyecto
+     */
+    static async listTickets(limit: number = 50, offset: number = 0, estado?: string, _tipo?: string, _chatId?: string, ticketId?: string, projectId?: string | null, serviceId?: string | null) {
+        const currentProjectId = projectId || this.PROJECT_IDENTIFIER;
+        if (process.env.STORAGE_MODE === "local") {
+            const res = await LocalHistoryStore.listTickets(limit, offset, estado, _tipo, _chatId, ticketId, currentProjectId);
+            return res.data;
+        }
+        try {
+            let query = supabase
+                .from('tickets')
+                .select('*')
+                .eq('project_id', currentProjectId);
+
+            const currentServiceId = serviceId || process.env.SERVICE_ID || process.env.RAILWAY_SERVICE_ID || this.SERVICE_IDENTIFIER;
+            if (currentServiceId && currentServiceId !== 'default_service') {
+                if (currentServiceId.includes(',')) {
+                    const servicesList = currentServiceId.split(',').map(s => s.trim()).filter(Boolean);
+                    query = query.in('service_id', [...servicesList, 'default_service']);
+                } else {
+                    query = query.or(`service_id.eq.${currentServiceId},service_id.eq.default_service,service_id.is.null`);
+                }
+            }
+
+            if (ticketId && ticketId !== 'null' && ticketId !== 'undefined' && ticketId !== '') {
+                query = query.eq('id', ticketId);
+            }
+
+            if (_chatId && _chatId !== 'null' && _chatId !== 'undefined' && _chatId !== '') {
+                query = query.eq('chat_id', this.normalizeId(_chatId));
+            }
+
+            if (_tipo && _tipo !== 'null' && _tipo !== 'undefined' && _tipo !== '') {
+                query = query.eq('tipo', _tipo);
+            }
+
+            if (estado && estado !== 'null' && estado !== 'undefined' && estado !== '') {
+                if (estado.includes(',')) {
+                    query = query.in('estado', estado.split(','));
+                } else if (estado === 'all_active') {
+                    query = query.neq('estado', 'Cerrado');
+                } else {
+                    query = query.eq('estado', estado);
+                }
+            } else if (estado === 'null' || estado === 'undefined') {
+                // No aplicar filtro de estado (trae todos)
+            } else {
+                query = query.in('estado', ['Abierto', 'En progreso']);
+            }
+
+            const { data, error } = await query
+                .order('updated_at', { ascending: false })
+                .range(offset, offset + limit - 1);
+
+            if (error) throw error;
+            return data || [];
+        } catch (err) {
+            console.error('[HistoryHandler] Error en listTickets:', err);
+            return [];
+        }
+    }
+
+    static async updateLeadAndTicket(ticketId: string, details: any) {
+        if (process.env.STORAGE_MODE === "local") {
+            const success = await LocalHistoryStore.updateLeadAndTicket(ticketId, details, HistoryHandler.PROJECT_IDENTIFIER);
+            return { success };
+        }
+        try {
+            console.log(`[HistoryHandler] Actualizando Lead/Ticket ${ticketId}`);
+
+            const { data: ticket, error: tError } = await supabase
+                .from('tickets')
+                .select('chat_id, project_id, service_id')
+                .eq('id', ticketId)
+                .single();
+
+            if (tError || !ticket) throw new Error('Ticket no encontrado');
+            const currentProjectId = ticket.project_id || HistoryHandler.PROJECT_IDENTIFIER;
+            const currentServiceId = (ticket as any).service_id || details.service_id || null;
+
+            const ticketUpdate: any = { updated_at: new Date().toISOString() };
+            if (details.titulo !== undefined) ticketUpdate.titulo = details.titulo;
+
+            const notesVal = details.notas !== undefined ? details.notas : details.notes;
+            if (notesVal !== undefined) ticketUpdate.descripcion = notesVal;
+
+            const priorityVal = details.priority || details.prioridad;
+            if (priorityVal !== undefined) ticketUpdate.prioridad = priorityVal;
+
+            if (details.chats_adjuntos !== undefined) ticketUpdate.chats_adjuntos = details.chats_adjuntos;
+
+            if (details.estado !== undefined) {
+                ticketUpdate.estado = details.estado;
+            } else if (details.contact?.crm_status !== undefined) {
+                ticketUpdate.estado = details.contact.crm_status;
+            } else if (details.contact?.crm_status === 'Cerrado' || details.contact?.crm_status === 'Vendido') {
+                ticketUpdate.estado = 'Cerrado';
+            }
+
+            const { error: upTicketErr } = await supabase
+                .from('tickets')
+                .update(ticketUpdate)
+                .eq('id', ticketId)
+                .eq('project_id', currentProjectId);
+
+            if (upTicketErr) throw upTicketErr;
+
+            // 3. Actualizar Contacto (Chat) en Supabase si corresponde o si se cierra el ticket
+            const hasContactDetails = details.contact !== undefined;
+            let updatedPhoneId: string | null = null;
+
+            if (hasContactDetails && ticket.chat_id) {
+                const targetNewPhone = details.contact.phone || details.contact.newPhone;
+                if (targetNewPhone && typeof targetNewPhone === 'string') {
+                    let cleanPhone = targetNewPhone.replace(/\D/g, '').trim();
+                    if (cleanPhone.startsWith('0')) cleanPhone = cleanPhone.slice(1);
+                    if (cleanPhone.length === 10) cleanPhone = `549${cleanPhone}`;
+
+                    if (cleanPhone && cleanPhone !== ticket.chat_id) {
+                        console.log(`📌 [updateLeadAndTicket] Actualizando teléfono de chat: ${ticket.chat_id} -> ${cleanPhone} para el proyecto ${currentProjectId}`);
+                        const { error: phoneErr } = await supabase
+                            .from('chats')
+                            .update({ id: cleanPhone })
+                            .eq('id', ticket.chat_id)
+                            .eq('project_id', currentProjectId);
+
+                        if (!phoneErr) {
+                            updatedPhoneId = cleanPhone;
+                        } else {
+                            console.error('❌ [updateLeadAndTicket] Error actualizando ID de teléfono:', phoneErr.message);
+                        }
+                    }
+                }
+            }
+
+            const activeChatTargetId = updatedPhoneId || ticket.chat_id;
+
+            if ((hasContactDetails || ticketUpdate.estado === 'Cerrado') && activeChatTargetId) {
+                const chatUpdate: any = {};
+                if (hasContactDetails) {
+                    if (details.contact.name !== undefined) chatUpdate.name = details.contact.name;
+                    if (details.contact.email !== undefined) chatUpdate.email = details.contact.email;
+                    if (details.contact.cuit_dni !== undefined) chatUpdate.cuit_dni = details.contact.cuit_dni;
+                    if (details.contact.address !== undefined) chatUpdate.address = details.contact.address;
+                    if (details.contact.tax_status !== undefined) chatUpdate.tax_status = details.contact.tax_status;
+                    if (details.contact.offered_product !== undefined) chatUpdate.offered_product = details.contact.offered_product;
+                    if (details.contact.crm_status !== undefined) chatUpdate.crm_status = details.contact.crm_status;
+                    if (details.contact.crm_due_date !== undefined) chatUpdate.crm_due_date = details.contact.crm_due_date;
+                    if (notesVal !== undefined) chatUpdate.notes = notesVal;
+                    if (details.contact.source !== undefined) chatUpdate.source = details.contact.source;
+                }
+
+                // Si el estado es cerrado, aplicar lógica de reset de bot y de-clasificación de lead
+                if (ticketUpdate.estado === 'Cerrado') {
+                    const isBlacklisted = await this.isContactBlacklisted(activeChatTargetId, currentProjectId, currentServiceId);
+                    chatUpdate.assigned_agent = 'asistente1';
+                    chatUpdate.bot_enabled = !isBlacklisted;
+                    chatUpdate.last_db_result = null;
+                    chatUpdate.is_lead = false;
+                    chatUpdate.crm_status = null;
+                }
+
+                if (Object.keys(chatUpdate).length > 0) {
+                    const { error: upChatErr } = await supabase
+                        .from('chats')
+                        .update(chatUpdate)
+                        .eq('id', activeChatTargetId)
+                        .eq('project_id', currentProjectId);
+
+                    if (upChatErr) throw upChatErr;
+
+                    // --- SINCRONIZACIÓN DUAL DE INSTANCIAS (LID <-> Teléfono) ---
+                    try {
+                        const { data: currentChat } = await supabase
+                            .from('chats')
+                            .select('metadata')
+                            .eq('id', activeChatTargetId)
+                            .eq('project_id', currentProjectId)
+                            .maybeSingle();
+
+                        let companionId: string | null = null;
+                        if (currentChat) {
+                            const metadata = currentChat.metadata || {};
+                            if (metadata.lid) {
+                                companionId = this.normalizeId(metadata.lid);
+                            } else if (metadata.phone_jid) {
+                                companionId = this.normalizeId(metadata.phone_jid);
+                            } else {
+                                const { data: phoneChat } = await supabase
+                                    .from('chats')
+                                    .select('id')
+                                    .eq('project_id', currentProjectId)
+                                    .eq('metadata->>lid', `${activeChatTargetId}@lid`)
+                                    .maybeSingle();
+                                if (phoneChat) companionId = phoneChat.id;
+                            }
+                        }
+
+                        if (companionId && companionId !== activeChatTargetId) {
+                            await supabase
+                                .from('chats')
+                                .update(chatUpdate)
+                                .eq('id', companionId)
+                                .eq('project_id', currentProjectId);
+                        }
+                    } catch (syncErr: any) {
+                        console.error(`[HistoryHandler] Error en sincronización dual LID/Teléfono en updateLeadAndTicket:`, syncErr.message);
+                    }
+
+                    historyEvents.emit('contact_updated', {
+                        chatId: activeChatTargetId,
+                        project_id: currentProjectId,
+                        details: chatUpdate
+                    });
+                }
+
+                this.invalidateChatCache(activeChatTargetId, currentProjectId);
+
+                if (ticketUpdate.estado === 'Cerrado') {
+                    const isBlacklisted = await this.isContactBlacklisted(activeChatTargetId, currentProjectId, currentServiceId);
+                    historyEvents.emit('bot_toggled', { chatId: activeChatTargetId, enabled: !isBlacklisted, assigned_agent: 'asistente1', projectId: currentProjectId });
+                }
+            }
+
+            historyEvents.emit('ticket_updated', { id: ticketId, chat_id: activeChatTargetId, ...ticketUpdate });
+
+            return { success: true, newPhone: updatedPhoneId || undefined };
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en updateLeadAndTicket:', err);
+            return { success: false, error: err.message };
+        }
+    }
+
+    static async updateTicket(ticketId: string, details: any) {
+        return this.updateLeadAndTicket(ticketId, details);
+    }
+
+    static async deleteTicket(ticketId: string, forcedProjectId?: string) {
+        const currentProjectId = forcedProjectId || HistoryHandler.PROJECT_IDENTIFIER;
+        if (process.env.STORAGE_MODE === "local") {
+            const success = await LocalHistoryStore.deleteTicket(ticketId, currentProjectId);
+            return { success };
+        }
+        try {
+            console.log(`[HistoryHandler] Eliminando ticket ${ticketId}`);
+
+            // Obtener el ticket para conocer el chat_id antes de eliminarlo
+            const { data: ticket } = await supabase
+                .from('tickets')
+                .select('chat_id')
+                .eq('id', ticketId)
+                .eq('project_id', currentProjectId)
+                .single();
+
+            const { error } = await supabase
+                .from('tickets')
+                .delete()
+                .eq('id', ticketId)
+                .eq('project_id', currentProjectId);
+
+            if (error) throw error;
+
+            if (ticket && ticket.chat_id) {
+                const isBlacklisted = await this.isContactBlacklisted(ticket.chat_id, currentProjectId);
+                // Actualizar contacto para que deje de ser lead y resetear bot
+                const chatUpdate = {
+                    is_lead: false,
+                    crm_status: null,
+                    assigned_agent: 'asistente1',
+                    bot_enabled: !isBlacklisted,
+                    last_db_result: null
+                };
+
+                await supabase
+                    .from('chats')
+                    .update(chatUpdate)
+                    .eq('id', ticket.chat_id)
+                    .eq('project_id', currentProjectId);
+
+                historyEvents.emit('contact_updated', {
+                    chatId: ticket.chat_id,
+                    project_id: currentProjectId,
+                    details: chatUpdate
+                });
+
+                this.invalidateChatCache(ticket.chat_id, currentProjectId);
+                historyEvents.emit('bot_toggled', { chatId: ticket.chat_id, enabled: !isBlacklisted, assigned_agent: 'asistente1', projectId: currentProjectId });
+            }
+
+            historyEvents.emit('ticket_deleted', { id: ticketId, projectId: currentProjectId });
+            return { success: true };
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en deleteTicket:', err);
+            return { success: false, error: err.message };
+        }
+    }
+
+    /**
+     * Lista los leads que tienen datos de CRM (editados y marcados explicitamente como leads)
+     */
+    static async listEditedLeads(limit: number = 50, offset: number = 0, projectId?: string | null, serviceId?: string | null) {
+        const currentProjectId = projectId || this.PROJECT_IDENTIFIER;
+        if (process.env.STORAGE_MODE === "local") {
+            return LocalHistoryStore.listEditedLeads(limit, offset, currentProjectId);
+        }
+        try {
+            const currentServiceId = serviceId || process.env.SERVICE_ID || process.env.RAILWAY_SERVICE_ID || this.SERVICE_IDENTIFIER;
+            let query = supabase
+                .from('chats')
+                .select('*, chat_tags(tag_id, tags(*))')
+                .eq('project_id', currentProjectId);
+
+            if (currentServiceId && currentServiceId !== 'default_service') {
+                if (currentServiceId.includes(',')) {
+                    const servicesList = currentServiceId.split(',').map(s => s.trim()).filter(Boolean);
+                    query = query.in('service_id', [...servicesList, 'default_service']);
+                } else {
+                    query = query.or(`service_id.eq.${currentServiceId},service_id.eq.default_service,service_id.is.null`);
+                }
+            }
+
+            const { data, error } = await query
+                .or('is_lead.eq.true,crm_status.not.is.null')
+                .order('last_message_at', { ascending: false })
+                .range(offset, offset + limit - 1);
+
+            if (error) throw error;
+            return (data || []).map(chat => ({
+                ...chat,
+                tags: chat.chat_tags ? chat.chat_tags.map((ct: any) => ct.tags).filter((t: any) => t !== null) : []
+            }));
+        } catch (err) {
+            console.error('[HistoryHandler] Error en listEditedLeads:', err);
+            return [];
+        }
+    }
+    /**
+     * Obtiene los leads con tareas próximas (hoy + 5 días)
+     */
+    static async getTasksDashboard(projectId?: string | null, serviceId?: string | null) {
+        const currentProjectId = projectId || this.PROJECT_IDENTIFIER;
+        if (process.env.STORAGE_MODE === "local") {
+            const chats = LocalHistoryStore.getChats(currentProjectId);
+            const fiveDaysLater = new Date();
+            fiveDaysLater.setDate(fiveDaysLater.getDate() + 5);
+            fiveDaysLater.setHours(23, 59, 59, 999);
+
+            const tasks = chats
+                .filter(c => c.is_lead === true && c.crm_due_date)
+                .filter(c => new Date(c.crm_due_date!) <= fiveDaysLater);
+
+            tasks.sort((a, b) => new Date(a.crm_due_date!).getTime() - new Date(b.crm_due_date!).getTime());
+            return tasks.map(c => ({
+                id: c.id,
+                name: c.name,
+                type: c.type,
+                crm_status: c.crm_status,
+                crm_due_date: c.crm_due_date
+            }));
+        }
+        try {
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+
+            const fiveDaysLater = new Date();
+            fiveDaysLater.setDate(today.getDate() + 5);
+            fiveDaysLater.setHours(23, 59, 59, 999);
+
+            const currentServiceId = serviceId || process.env.SERVICE_ID || process.env.RAILWAY_SERVICE_ID || this.SERVICE_IDENTIFIER;
+            let query = supabase
+                .from('chats')
+                .select('id, name, type, crm_status, crm_due_date')
+                .eq('project_id', currentProjectId)
+                .eq('is_lead', true);
+
+            if (currentServiceId && currentServiceId !== 'default_service') {
+                if (currentServiceId.includes(',')) {
+                    const servicesList = currentServiceId.split(',').map(s => s.trim()).filter(Boolean);
+                    query = query.in('service_id', [...servicesList, 'default_service']);
+                } else {
+                    query = query.or(`service_id.eq.${currentServiceId},service_id.eq.default_service,service_id.is.null`);
+                }
+            }
+            const { data, error } = await query
+                .not('crm_due_date', 'is', null)
+                .lte('crm_due_date', fiveDaysLater.toISOString())
+                .order('crm_due_date', { ascending: true });
+
+            if (error) throw error;
+            return data || [];
+        } catch (err) {
+            console.error('[HistoryHandler] Error en getTasksDashboard:', err);
+            return [];
+        }
+    }
+
+    /**
+     * Guarda o actualiza los datos de onboarding de Meta
+     */
+    static async saveMetaOnboardingData(wabaId: string, phoneId: string, token: string, extra: any = {}, projectId: string | null = null, serviceId: string | null = null) {
+        try {
+            const targetProjectId = projectId || PROJECT_ID;
+            const targetServiceId = serviceId || HistoryHandler.SERVICE_IDENTIFIER;
+            const tenantResolution = await this.resolveTenantIdByProjectId(targetProjectId);
+
+            if (
+                !tenantResolution.resolved ||
+                tenantResolution.globalScope ||
+                !tenantResolution.tenantId
+            ) {
+                throw new Error(
+                    `[Tenant] No se pudo resolver tenant para Meta onboarding del proyecto ${targetProjectId}`
+                );
+            }
+
+            const tenantId = tenantResolution.tenantId;
+
+            // Identificar al Super Usuario (Carlitos Pepe) para asignar propiedad
+            let superUserId = null;
+            try {
+                const { data: admin } = await supabase.from('users').select('id').eq('meta_id', '61584766540235').maybeSingle();
+                if (admin) superUserId = admin.id;
+            } catch (e) { /* ignore */ }
+
+            // Obtener el mainToken del sistema de una vez si existe
+            const mainToken = await this.getMainToken();
+            const tokenToSave = mainToken || token;
+
+            // Si el token original (del cliente) es diferente del mainToken, guardarlo en onboarding_data para syncs y auditorías
+            let onboardingData = extra || {};
+            if (token && token !== mainToken) {
+                onboardingData = {
+                    ...onboardingData,
+                    client_token: token
+                };
+            }
+
+            const { data, error } = await supabase
+                .from('meta_onboarding')
+                .upsert({
+                    project_id: targetProjectId,
+                    service_id: targetServiceId,
+                    waba_id: wabaId,
+                    phone_number_id: phoneId,
+                    access_token: tokenToSave,
+                    onboarding_data: onboardingData,
+                    owner_id: superUserId,
+                    status: 'active',
+                    updated_at: new Date().toISOString()
+                }, { onConflict: 'project_id,service_id' })
+                .select()
+                .single();
+
+            if (error) throw error;
+
+            // --- PASO ADICIONAL: Sincronizar con la routing_table para habilitar webhooks globales ---
+            // Solo si tenemos un dominio público configurado
+            // Priorizar el dominio estático de Railway (*.up.railway.app) para evitar fallos de DNS en dominios personalizados
+            const publicDomain = (process.env.RAILWAY_STATIC_URL && process.env.RAILWAY_STATIC_URL.includes('.up.railway.app'))
+                ? process.env.RAILWAY_STATIC_URL
+                : (process.env.RAILWAY_PUBLIC_DOMAIN && process.env.RAILWAY_PUBLIC_DOMAIN.includes('.up.railway.app'))
+                    ? process.env.RAILWAY_PUBLIC_DOMAIN
+                    : (process.env.RAILWAY_PUBLIC_DOMAIN || process.env.PROJECT_URL);
+            if (publicDomain && phoneId) {
+                let projectUrl = publicDomain.startsWith('http') ? publicDomain : `https://${publicDomain}`;
+                // Asegurar que termina sin barra lateral para consistencia
+                if (projectUrl.endsWith('/')) projectUrl = projectUrl.slice(0, -1);
+                console.log(`📡 [HistoryHandler] Sincronizando routing_table para ${phoneId} -> ${projectUrl}`);
+
+                await supabase
+                    .from('routing_table')
+                    .upsert({
+                        phone_number_id: phoneId,
+                        waba_id: wabaId,
+                        project_id: targetProjectId,
+                        service_id: targetServiceId,
+                        project_url: projectUrl,
+                        updated_at: new Date().toISOString()
+                    }, { onConflict: 'phone_number_id' });
+            }
+
+            // --- PASO ADICIONAL 2: Asegurar suscripción a la WABA vía API de Meta ---
+            // Esto garantiza que Meta envíe los webhooks al enrutador
+            if (wabaId && tokenToSave) {
+                try {
+                    const axios = (await import('axios')).default;
+                    const subscribe = async (fields: string) => axios.post(`https://graph.facebook.com/v25.0/${wabaId}/subscribed_apps`,
+                        {},
+                        {
+                            headers: { 'Authorization': `Bearer ${tokenToSave}` },
+                            params: { subscribed_fields: fields }
+                        }
+                    );
+                    try {
+                        await subscribe('messages,smb_message_echoes,smb_app_state_sync,history');
+                        console.log(`[HistoryHandler] Suscripcion de webhooks confirmada para WABA ${wabaId} (messages + SMB sync)`);
+                    } catch (extendedErr: any) {
+                        await subscribe('messages,smb_message_echoes');
+                        console.warn('[HistoryHandler] Meta rechazo campos SMB extendidos; usando suscripcion basica:', extendedErr.response?.data || extendedErr.message);
+                    }
+                } catch (apiErr: any) {
+                    console.warn(`⚠️ [HistoryHandler] No se pudo confirmar la suscripción de webhooks:`, apiErr.response?.data || apiErr.message);
+                }
+            }
+
+            // --- PASO ADICIONAL 3: Migrar al token maestro si existe (Fallback) ---
+            try {
+                if (mainToken && tokenToSave !== mainToken) {
+                    console.log(`📡 [HistoryHandler] Migrando token de cliente a 'main_token' para WABA ${wabaId}...`);
+                    await supabase
+                        .from('meta_onboarding')
+                        .update({ access_token: mainToken })
+                        .eq('waba_id', wabaId);
+                }
+            } catch (swapErr) {
+                console.warn('⚠️ [HistoryHandler] No se pudo migrar al main_token:', swapErr);
+            }
+
+            historyEvents.emit('whatsapp_line_changed', {
+                projectId: targetProjectId,
+                project_id: targetProjectId,
+                serviceId: targetServiceId,
+                service_id: targetServiceId,
+                provider: 'meta'
+            });
+
+            return { success: true, data };
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en saveMetaOnboardingData:', err);
+            return { success: false, error: err.message };
+        }
+    }
+
+    /**
+     * Obtiene los datos de onboarding configurados
+     */
+    static async getMetaOnboardingData(projectId: string | null = null, fallbackToMain: boolean = false, serviceId: string | null = null) {
+        try {
+            const targetProjectId = projectId || this.PROJECT_IDENTIFIER;
+            const targetServiceId = serviceId || this.SERVICE_IDENTIFIER;
+
+            let query = supabase.from('meta_onboarding').select('*').eq('project_id', targetProjectId);
+            if (targetServiceId && targetServiceId !== 'default_service') {
+                query = query.eq('service_id', targetServiceId);
+            }
+
+            const { data: initialData, error } = await query.maybeSingle();
+
+            if (error) throw error;
+
+            let data = initialData;
+
+            // Si no hay datos y se solicita fallback, buscamos el 'main_token'
+            if (!data && fallbackToMain) {
+                console.log(`ℹ️ [HistoryHandler] No hay token para ${targetProjectId}, intentando obtener 'main_token'...`);
+                const mainRes = await supabase
+                    .from('meta_onboarding')
+                    .select('*')
+                    .eq('project_id', 'main_token')
+                    .maybeSingle();
+                if (!mainRes.error && mainRes.data) {
+                    data = mainRes.data;
+                }
+            }
+
+            if (data) {
+                return {
+                    ...data,
+                    whatsappToken: data.access_token,
+                    whatsappNumberId: data.phone_number_id,
+                    whatsappBusinessId: data.waba_id
+                };
+            }
+            return null;
+        } catch (err) {
+            console.error('[HistoryHandler] Error en getMetaOnboardingData:', err);
+            return null;
+        }
+    }
+
+    /**
+     * Sincroniza automáticamente la routing_table al inicio del servidor con la URL activa de Railway
+     */
+    static async syncRoutingTableOnStartup() {
+        try {
+            if (!supabase) return;
+
+            const tenantResolution = await this.resolveTenantIdByProjectId(
+                this.PROJECT_IDENTIFIER
+            );
+
+            if (
+                !tenantResolution.resolved ||
+                tenantResolution.globalScope ||
+                !tenantResolution.tenantId
+            ) {
+                console.warn(
+                    `[HistoryHandler] Omitiendo sync de routing_table: tenant no resuelto para ${this.PROJECT_IDENTIFIER}`
+                );
+                return;
+            }
+
+            const tenantId = tenantResolution.tenantId;
+
+            const onboardingData = await this.getMetaOnboardingData();
+            if (!onboardingData || !onboardingData.phone_number_id) return;
+
+            const publicDomain = (process.env.RAILWAY_STATIC_URL && process.env.RAILWAY_STATIC_URL.includes('.up.railway.app'))
+                ? process.env.RAILWAY_STATIC_URL
+                : (process.env.RAILWAY_PUBLIC_DOMAIN && process.env.RAILWAY_PUBLIC_DOMAIN.includes('.up.railway.app'))
+                    ? process.env.RAILWAY_PUBLIC_DOMAIN
+                    : (process.env.RAILWAY_PUBLIC_DOMAIN || process.env.PROJECT_URL);
+
+            if (publicDomain) {
+                let projectUrl = publicDomain.startsWith('http')
+                    ? publicDomain
+                    : `https://${publicDomain}`;
+
+                if (projectUrl.endsWith('/')) {
+                    projectUrl = projectUrl.slice(0, -1);
+                }
+
+                console.log(
+                    `📡 [HistoryHandler] Auto-sincronizando routing_table al inicio para phoneId ${onboardingData.phone_number_id} -> ${projectUrl} (Service: ${this.SERVICE_IDENTIFIER})`
+                );
+
+                await supabase
+                    .from('routing_table')
+                    .upsert({
+                        phone_number_id: onboardingData.phone_number_id,
+                        waba_id: onboardingData.waba_id,
+                        project_id: this.PROJECT_IDENTIFIER,
+                        service_id: this.SERVICE_IDENTIFIER,
+                        project_url: projectUrl,
+                        updated_at: new Date().toISOString()
+                    }, { onConflict: 'phone_number_id' });
+            }
+        } catch (err: any) {
+            console.error(
+                '❌ [HistoryHandler] Error en syncRoutingTableOnStartup:',
+                err?.message || err
+            );
+        }
+    }
+
+    /**
+     * Al desplegar/reiniciar, reclama automáticamente todas las settings del proyecto
+     * que estén en 'default_service' o NULL y las asigna al service_id activo de Railway.
+     */
+    static async autoMigrateSettingsServiceIdOnStartup() {
+        try {
+            if (!supabase) return;
+            const currentProjectId = this.PROJECT_IDENTIFIER;
+            const currentServiceId = process.env.SERVICE_ID || process.env.RAILWAY_SERVICE_ID || this.SERVICE_IDENTIFIER;
+
+            if (!currentServiceId || currentServiceId === 'default_service') return;
+
+            const { data: defaultSettings } = await supabase
+                .from('settings')
+                .select('key')
+                .eq('project_id', currentProjectId)
+                .or('service_id.eq.default_service,service_id.is.null');
+
+            if (defaultSettings && defaultSettings.length > 0) {
+                console.log(`📡 [HistoryHandler] Asignando automáticamente ${defaultSettings.length} settings de 'default_service' -> '${currentServiceId}' (Proyecto: ${currentProjectId})...`);
+
+                for (const setting of defaultSettings) {
+                    await supabase
+                        .from('settings')
+                        .update({ service_id: currentServiceId, updated_at: new Date().toISOString() })
+                        .eq('project_id', currentProjectId)
+                        .eq('key', setting.key)
+                        .or('service_id.eq.default_service,service_id.is.null');
+                }
+            }
+        } catch (err: any) {
+            console.error('❌ [HistoryHandler] Error en autoMigrateSettingsServiceIdOnStartup:', err?.message || err);
+        }
+    }
+
+    /**
+     * Obtiene específicamente el token maestro del sistema
+     */
+    static async getMainToken() {
+        const data = await this.getMetaOnboardingData('main_token');
+        return data?.access_token || null;
+    }
+
+    static subscribeToSettingsChanges() {
+        if (!supabase) return;
+        const projectId = this.PROJECT_IDENTIFIER;
+        supabase
+            .channel(`settings-changes-${projectId}`)
+            .on('postgres_changes', {
+                event: '*',
+                schema: 'public',
+                table: 'settings'
+            }, (payload: any) => {
+                if (payload.new?.project_id !== projectId && payload.old?.project_id !== projectId) return;
+                const key = payload.new?.key || payload.old?.key;
+                const value = payload.new?.value;
+                const serviceId = payload.new?.service_id || payload.old?.service_id;
+                if (!key) return;
+                this.invalidateSettingCache(key);
+                const displayVal = (key.toUpperCase().includes('KEY') || key.toUpperCase().includes('TOKEN') || key.toUpperCase().includes('SECRET') || key.toUpperCase().includes('PASS') || key.toUpperCase().includes('PWD'))
+                    ? 'OK'
+                    : value;
+                console.log(`📡 [Realtime] Setting cambiado: ${key} = ${displayVal} (Service: ${serviceId})`);
+                historyEvents.emit('setting_changed', { key, value, projectId, serviceId });
+            })
+            .subscribe((status: string) => {
+                if (status === 'SUBSCRIBED') {
+                    console.log(`✅ [Realtime] Suscrito a cambios de settings para proyecto ${projectId}`);
+                } else if (status === 'CHANNEL_ERROR') {
+                    console.error(`❌ [Realtime] Error en suscripción de settings. Verifica que Realtime esté habilitado en la tabla 'settings' en Supabase.`);
+                }
+            });
+    }
+
+    static subscribeToTicketChanges() {
+        if (!supabase) return;
+        const projectId = this.PROJECT_IDENTIFIER;
+        supabase
+            .channel(`tickets-changes-${projectId}`)
+            .on('postgres_changes', {
+                event: '*',
+                schema: 'public',
+                table: 'tickets'
+            }, (payload: any) => {
+                if (payload.new?.project_id !== projectId && payload.old?.project_id !== projectId) return;
+                if (payload.eventType === 'INSERT' && payload.new?.tipo === 'Nuevo Lead') {
+                    console.log(`📡 [Realtime] Nuevo ticket Lead creado para ${payload.new?.chat_id}`);
+                    historyEvents.emit('reporte_created', { reporte: payload.new, projectId });
+                }
+                if (payload.eventType === 'UPDATE') {
+                    historyEvents.emit('ticket_updated', payload.new);
+                }
+                if (payload.eventType === 'DELETE') {
+                    historyEvents.emit('ticket_deleted', payload.old);
+                }
+            })
+            .subscribe((status: string) => {
+                if (status === 'SUBSCRIBED') {
+                    console.log(`✅ [Realtime] Suscrito a tabla tickets para proyecto ${projectId}`);
+                } else if (status === 'CHANNEL_ERROR') {
+                    console.error(`❌ [Realtime] Error en suscripción de tickets. Verifica que Realtime esté habilitado en la tabla 'tickets' en Supabase.`);
+                }
+            });
+    }
+
+    static subscribeToUsersChanges() {
+        if (!supabase) return;
+        const projectId = this.PROJECT_IDENTIFIER;
+        supabase
+            .channel(`users-changes-${projectId}`)
+            .on('postgres_changes', {
+                event: '*',
+                schema: 'public',
+                table: 'users'
+            }, (payload: any) => {
+                if (payload.new?.project_id !== projectId && payload.old?.project_id !== projectId) return;
+                console.log(`📡 [Realtime] Cambio detectado en tabla users para proyecto ${projectId}`);
+                historyEvents.emit('user_updated', payload.new || payload.old);
+            })
+            .subscribe((status: string) => {
+                if (status === 'SUBSCRIBED') {
+                    console.log(`✅ [Realtime] Suscrito a tabla users para proyecto ${projectId}`);
+                } else if (status === 'CHANNEL_ERROR') {
+                    console.error(`❌ [Realtime] Error en suscripción de users. Verifica que Realtime esté habilitado en la tabla 'users' en Supabase.`);
+                }
+            });
+    }
+
+    static subscribeToChatChanges() {
+        if (!supabase) return;
+        const projectId = this.PROJECT_IDENTIFIER;
+        supabase
+            .channel(`chats-changes-${projectId}`)
+            .on('postgres_changes', {
+                event: '*',
+                schema: 'public',
+                table: 'chats'
+            }, (payload: any) => {
+                const chat = payload.new || payload.old;
+                if (!chat || chat.project_id !== projectId) return;
+                historyEvents.emit('chat_updated', {
+                    ...chat,
+                    chatId: chat.id,
+                    projectId: chat.project_id,
+                    serviceId: chat.service_id || null,
+                    eventType: payload.eventType
+                });
+            })
+            .subscribe((status: string) => {
+                if (status === 'SUBSCRIBED') {
+                    console.log(`✅ [Realtime] Suscrito a tabla chats para proyecto ${projectId}`);
+                } else if (status === 'CHANNEL_ERROR') {
+                    console.error(`❌ [Realtime] Error en suscripción de chats. Verifica que Realtime esté habilitado en la tabla 'chats' en Supabase.`);
+                }
+            });
+    }
+
+    static invalidateSettingCache(key: string, projectId: string | null = null) {
+        const targetProjectId = projectId || HistoryHandler.PROJECT_IDENTIFIER;
+        this.settingsCache.delete(`${targetProjectId}:${key}`);
+    }
+
+    static async updateMessageExternalId(internalId: string, externalId: string, newStatus?: string): Promise<boolean> {
+        try {
+            const updatePayload: any = { external_id: externalId };
+            if (newStatus) updatePayload.status = newStatus;
+
+            const { error } = await supabase.from('messages').update(updatePayload).eq('id', internalId);
+            if (error) throw error;
+            return true;
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en updateMessageExternalId:', err.message);
+            return false;
+        }
+    }
+
+    static async saveSystemLog(
+        service: 'OPENAI' | 'META' | 'SUPABASE' | 'SYSTEM' | 'RAILWAY',
+        level: 'INFO' | 'WARN' | 'ERROR',
+        message: string,
+        clientId: string | null = null,
+        details: any = {}
+    ): Promise<void> {
+        if (!supabase) return;
+        try {
+            const projectId = HistoryHandler.PROJECT_IDENTIFIER;
+            const { error } = await supabase.from('system_logs').insert([{
+                project_id: projectId,
+                service,
+                level,
+                message,
+                client_id: clientId,
+                details
+            }]);
+
+            if (error) {
+                console.error('[HistoryHandler] Error guardando system log:', error);
+            }
+        } catch (err) {
+            console.error('[HistoryHandler] Exception guardando system log:', err);
+        }
+    }
+
+    static async saveSetting(key: string, value: string, projectId: string | null = null, serviceId: string | null = null) {
+        if (!supabase) return;
+        const targetProjectId = projectId || HistoryHandler.PROJECT_IDENTIFIER;
+        const targetServiceId = serviceId || process.env.SERVICE_ID || process.env.RAILWAY_SERVICE_ID || HistoryHandler.SERVICE_IDENTIFIER;
+
+        // Invalidar cache en memoria
+        const cacheKey = `${targetProjectId}:${targetServiceId}:${key}`;
+        this.settingsCache.delete(cacheKey);
+
+        const tenantResolution = await this.resolveTenantIdByProjectId(targetProjectId);
+
+        const payload: any = {
+            project_id: targetProjectId,
+            service_id: targetServiceId,
+            key,
+            value,
+            updated_at: new Date().toISOString()
+        };
+
+        const { error } = await supabase
+            .from('settings')
+            .upsert(payload, { onConflict: 'project_id,service_id,key' });
+
+        if (error) {
+            console.error(`❌ [HistoryHandler] Error guardando setting ${key}:`, error);
+            throw new Error(`Error guardando configuracion ${key}: ${error.message}`);
+        } else {
+            // Sincronizar en process.env para que el bot actualice su comportamiento de inmediato (Hot-update)
+            if (targetProjectId === HistoryHandler.PROJECT_IDENTIFIER && value !== 'PENDING') {
+                process.env[key] = value;
+            }
+
+            // --- PASO ADICIONAL: Si configuramos IDs de Meta, registrar en la routing_table para triangulación ---
+            if ((key === 'FACEBOOK_PAGE_ID' || key === 'INSTAGRAM_BUSINESS_ID') && value) {
+                const publicDomain = (process.env.RAILWAY_STATIC_URL && process.env.RAILWAY_STATIC_URL.includes('.up.railway.app'))
+                    ? process.env.RAILWAY_STATIC_URL
+                    : (process.env.RAILWAY_PUBLIC_DOMAIN && process.env.RAILWAY_PUBLIC_DOMAIN.includes('.up.railway.app'))
+                        ? process.env.RAILWAY_PUBLIC_DOMAIN
+                        : (process.env.RAILWAY_PUBLIC_DOMAIN || process.env.PROJECT_URL);
+                if (publicDomain && value) {
+                    let projectUrl = publicDomain.startsWith('http')
+                        ? publicDomain
+                        : `https://${publicDomain}`;
+
+                    if (projectUrl.endsWith('/')) {
+                        projectUrl = projectUrl.slice(0, -1);
+                    }
+
+                    console.log(
+                        `📡 [HistoryHandler] Sincronizando routing_table para ${key}: ${value} -> ${projectUrl}`
+                    );
+
+                    await supabase
+                        .from('routing_table')
+                        .upsert({
+                            phone_number_id: value,
+                            waba_id: null,
+                            project_id: targetProjectId,
+                            service_id: targetServiceId,
+                            project_url: projectUrl,
+                            updated_at: new Date().toISOString()
+                        }, { onConflict: 'phone_number_id' });
+                }
+            }
+        }
+    }
+
+    static async getAllProjectServices(projectId: string): Promise<string[]> {
+        if (!supabase) return ['default_service'];
+        try {
+            // Consultar todos los service_id únicos para el project_id en settings y chats
+            const { data, error } = await supabase
+                .from('settings')
+                .select('service_id')
+                .eq('project_id', projectId);
+
+            if (error) throw error;
+
+            const services = (data || [])
+                .map((item: any) => item.service_id)
+                .filter((val: any, idx: number, self: any[]) => val && val !== 'null' && val !== 'generic' && self.indexOf(val) === idx);
+
+            return services.length > 0 ? services : ['default_service'];
+        } catch (e: any) {
+            console.error('[HistoryHandler] Error en getAllProjectServices:', e.message);
+            return ['default_service'];
+        }
+    }
+
+    static async getSetting(key: string, projectId: string | null = null, serviceId: string | null = null, strictService: boolean = false): Promise<string | null> {
+        if (!supabase) return null;
+        const targetProjectId = projectId || HistoryHandler.PROJECT_IDENTIFIER;
+        const rawServiceId = serviceId || process.env.SERVICE_ID || process.env.RAILWAY_SERVICE_ID || HistoryHandler.SERVICE_IDENTIFIER;
+
+        const isGenericService = !rawServiceId ||
+            rawServiceId === 'default_service' ||
+            rawServiceId === 'generic' ||
+            rawServiceId === 'null' ||
+            rawServiceId.trim() === '';
+
+        const targetServiceId = isGenericService ? null : rawServiceId;
+        const cacheKey = `${targetProjectId}:${targetServiceId || 'default'}:${key}`;
+        const now = Date.now();
+
+        // 1. Intentar obtener desde cache en memoria (excepto credenciales para garantizar realtime)
+        if (key !== 'ADMIN_USER' && key !== 'ADMIN_PASS') {
+            const cached = this.settingsCache.get(cacheKey);
+            if (cached && (now - cached.timestamp < this.CACHE_TTL_MS)) {
+                return cached.value;
+            }
+        }
+
+        let query = supabase
+            .from('settings')
+            .select('value')
+            .eq('project_id', targetProjectId)
+            .eq('key', key);
+
+        if (targetServiceId) {
+            query = query.eq('service_id', targetServiceId);
+        } else if (strictService) {
+            query = query.is('service_id', null);
+        }
+
+        const { data: mainData, error } = await query.maybeSingle();
+
+        if (error && error.code !== 'PGRST116') {
+            console.error(`❌ [HistoryHandler] Error obteniendo setting ${key}:`, error);
+        }
+
+        let data = mainData;
+
+        // Fallback: Si no lo encontró con service_id específico, buscar solo por project_id
+        if (!data && targetServiceId && !strictService) {
+            const fallbackRes = await supabase
+                .from('settings')
+                .select('value')
+                .eq('project_id', targetProjectId)
+                .eq('key', key)
+                .limit(1)
+                .maybeSingle();
+            if (fallbackRes.data) {
+                data = fallbackRes.data;
+            }
+        }
+
+        let value = data ? data.value : null;
+
+        if (key === 'CRM_FIELDS_CONFIG' && (!value || value.trim() === '')) {
+            const slug = await this.getConfig('CLIENT_SLUG', targetProjectId);
+            const cleanSlug = String(slug || '').trim().toLowerCase();
+
+            if (cleanSlug === 'ganemos' || cleanSlug === 'ganemos-net' || cleanSlug === 'cas-epc' || cleanSlug === 'casepc') {
+                value = JSON.stringify([
+                    { id: 'crm-ticket-title', label: 'Titulo del Ticket', visible: true, order: 0 },
+                    { id: 'crm-name', label: 'Nombre del Contacto', visible: true, order: 1 },
+                    { id: 'crm-phone', label: 'Teléfono', visible: true, order: 2 },
+                    { id: 'crm-cuit', label: 'Usuario / DNI', visible: true, order: 3 },
+                    { id: 'crm-email', label: 'Correo Electrónico', visible: true, order: 4 },
+                    { id: 'crm-address', label: 'Domicilio', visible: true, order: 5 },
+                    { id: 'crm-tax-status', label: 'Situación Impositiva', visible: true, order: 6 },
+                    { id: 'crm-product', label: 'Producto Ofrecido', visible: true, order: 7 },
+                    { id: 'crm-source', label: 'Fuente / Canal', visible: true, order: 8 },
+                    { id: 'crm-notes', label: 'Historial de Notas', visible: true, order: 9 },
+                    { id: 'crm-due-date', label: 'Fecha Alerta / Seguimiento', visible: true, order: 10 },
+                    { id: 'crm-priority', label: 'Prioridad', visible: true, order: 11 },
+                    { id: 'crm-status', label: 'Estado del Lead (CRM)', visible: true, order: 12 }
+                ]);
+            } else if (cleanSlug === 'aquavita') {
+                value = JSON.stringify([
+                    { id: 'crm-ticket-title', label: 'Titulo del Ticket', visible: true, order: 0 },
+                    { id: 'crm-name', label: 'Nombre del Contacto', visible: true, order: 1 },
+                    { id: 'crm-phone', label: 'Teléfono', visible: true, order: 2 },
+                    { id: 'crm-cuit', label: 'Nro Cliente / DNI', visible: true, order: 3 },
+                    { id: 'crm-email', label: 'Correo Electrónico', visible: true, order: 4 },
+                    { id: 'crm-address', label: 'Dirección', visible: true, order: 5 },
+                    { id: 'crm-tax-status', label: 'Tipo Cliente', visible: true, order: 6 },
+                    { id: 'crm-product', label: 'Producto Ofrecido', visible: true, order: 7 },
+                    { id: 'crm-source', label: 'Fuente / Canal', visible: true, order: 8 },
+                    { id: 'crm-notes', label: 'Historial de Notas', visible: true, order: 9 },
+                    { id: 'crm-due-date', label: 'Fecha Alerta / Seguimiento', visible: true, order: 10 },
+                    { id: 'crm-priority', label: 'Prioridad', visible: true, order: 11 },
+                    { id: 'crm-status', label: 'Estado del Lead (CRM)', visible: true, order: 12 }
+                ]);
+            }
+        }
+
+        if ((key === 'ADMIN_USER' || key === 'ADMIN_PASS') && value && value.startsWith('b64:')) {
+            try {
+                value = Buffer.from(value.slice(4), 'base64').toString('utf-8');
+            } catch (e) {
+                console.error(`[HistoryHandler] Error decoding base64 setting ${key}:`, e);
+            }
+        }
+
+        // 2. Guardar en cache antes de retornar
+        this.settingsCache.set(cacheKey, { value, timestamp: now });
+
+        return value;
+    }
+
+    /**
+     * Helper de configuración dinámica (Hot-update).
+     * Busca primero en la base de datos (settings) y si no existe, recurre a process.env.
+     */
+    static async getConfig(key: string, projectId: string | null = null, serviceId: string | null = null): Promise<string | null> {
+        const dbValue = await this.getSetting(key, projectId, serviceId);
+        if (dbValue !== null && dbValue !== undefined && dbValue !== '') {
+            return dbValue;
+        }
+
+        // Si no está en DB, lo tomamos de Railway (env)
+        const envValue = process.env[key] || null;
+
+        // Si lo encontramos en Railway pero no estaba en DB, lo retornamos pero NO lo persistimos automáticamente
+        // para evitar sobreescrituras accidentales de la configuración base.
+        return envValue;
+    }
+
+    /**
+     * Mapea un estado legible por humanos (título de la columna) al ID técnico de la columna del CRM.
+     * Esto permite que la IA devuelva "QUIERE REUNION" y se guarde "propuesta" en la base de datos.
+     */
+    static async mapStatusToId(statusLabel: string, projectId: string | null = null): Promise<string> {
+        if (!statusLabel || statusLabel === '-') return statusLabel;
+
+        try {
+            const crmColumnsRaw = await this.getSetting('CRM_COLUMNS', projectId);
+            if (!crmColumnsRaw) return statusLabel;
+
+            const columns = JSON.parse(crmColumnsRaw);
+            if (!Array.isArray(columns)) return statusLabel;
+
+            // Force UNASSIGNED column to have 'Leads Nuevos' title dynamically
+            const unassignedCol = columns.find((col: any) => col.id === 'UNASSIGNED');
+            if (unassignedCol) {
+                unassignedCol.title = 'Leads Nuevos';
+            }
+
+            // Normalización para comparación (sin espacios extra, minúsculas)
+            const normalizedInput = statusLabel.trim().toLowerCase();
+
+            // 1. Buscar coincidencia exacta por título
+            const match = columns.find((col: any) =>
+                col.title && col.title.trim().toLowerCase() === normalizedInput
+            );
+
+            if (match) {
+                console.log(`🎯 [HistoryHandler] Mapeo de estado: "${statusLabel}" -> "${match.id}"`);
+                return match.id;
+            }
+
+            // 2. Si no hay match exacto, buscar por ID (por si la IA ya devolvió el ID correcto)
+            const idMatch = columns.find((col: any) =>
+                col.id && col.id.trim().toLowerCase() === normalizedInput
+            );
+
+            if (idMatch) return idMatch.id;
+
+            return statusLabel; // Fallback
+        } catch (err) {
+            console.error('[HistoryHandler] Error en mapStatusToId:', err);
+            return statusLabel;
+        }
+    }
+
+    private static async bootstrapConfig() {
+        try {
+            const currentProjectId = this.PROJECT_IDENTIFIER;
+            const MASTER_ID = "defaul";
+            console.log(`[Bootstrap] 🚀 Iniciando Bootstrap para: ${currentProjectId}`);
+
+            if (currentProjectId === MASTER_ID || currentProjectId === "default_project") {
+                console.log(`ℹ️ [Bootstrap] Saltando clonación para proyecto maestro o por defecto.`);
+                return;
+            }
+
+            const tenantResolution = await this.resolveTenantIdByProjectId(currentProjectId);
+
+            // 1. Obtener todas las llaves configuradas en el proyecto actual
+            const { data: currentSettings } = await supabase.from('settings')
+                .select('key')
+                .eq('project_id', currentProjectId)
+                .eq('service_id', HistoryHandler.SERVICE_IDENTIFIER);
+            const currentKeys = new Set((currentSettings || []).map(s => s.key));
+
+            console.log(`[Bootstrap] Proyecto ${currentProjectId} (Servicio: ${HistoryHandler.SERVICE_IDENTIFIER}) tiene ${currentKeys.size} variables en DB.`);
+
+            // 2. Obtener configuración del maestro 'defaul'
+            const { data: masterSettings } = await supabase.from('settings')
+                .select('key, value')
+                .eq('project_id', MASTER_ID)
+                .eq('service_id', 'default_service');
+
+            if (masterSettings && masterSettings.length > 0) {
+                // Lista de llaves que NUNCA deben clonarse automáticamente desde el maestro
+                const protectedKeys = [
+                    'OPENAI_API_KEY',
+                    'OPENAI_ADMIN_API_KEY',
+                    'OPENAI_API_KEY_TOOLS',
+                    'ADMIN_USER',
+                    'ADMIN_PASS'
+                ];
+
+                const settingsToInsert = masterSettings
+                    .filter(s => !protectedKeys.includes(s.key)) // Protección extra para llaves sensibles
+                    .filter(s => !currentKeys.has(s.key)) // Solo las que no existen en el proyecto actual
+                    .map(s => {
+                        const payload: any = {
+                            project_id: currentProjectId,
+                            service_id: HistoryHandler.SERVICE_IDENTIFIER,
+                            key: s.key,
+                            value: s.value,
+                            updated_at: new Date().toISOString()
+                        };
+                        return payload;
+                    });
+
+                if (settingsToInsert.length > 0) {
+                    console.log(`🆕 [Bootstrap] Backfill/Clonando ${settingsToInsert.length} variables faltantes desde '${MASTER_ID}' para ${currentProjectId}...`);
+                    const { error: cloneErr } = await supabase.from('settings').insert(settingsToInsert);
+
+                    if (cloneErr) {
+                        console.error(`❌ [Bootstrap] Error al clonar variables faltantes desde '${MASTER_ID}':`, cloneErr);
+                    } else {
+                        console.log(`✅ [Bootstrap] ${settingsToInsert.length} variables clonadas exitosamente desde '${MASTER_ID}' para ${currentProjectId}.`);
+                    }
+                } else {
+                    console.log(`✅ [Bootstrap] El proyecto ${currentProjectId} ya tiene todas las variables del maestro.`);
+                }
+            } else {
+                console.warn(`⚠️ [Bootstrap] No se encontró configuración en el proyecto maestro '${MASTER_ID}'. El bot iniciará sin variables.`);
+            }
+
+            // 3. Asegurar existencia de API_KEY única para este proyecto
+            const { data: apiKeySetting } = await supabase
+                .from('settings')
+                .select('value')
+                .eq('project_id', currentProjectId)
+                .eq('service_id', HistoryHandler.SERVICE_IDENTIFIER)
+                .eq('key', 'api_key')
+                .maybeSingle();
+
+            if (!apiKeySetting) {
+                const uniqueKey = `sk_rialway_${crypto.randomBytes(16).toString('hex')}`;
+                console.log(`🆕 [Bootstrap] Generando API_KEY única para el proyecto: ${uniqueKey}`);
+                const payload: any = {
+                    project_id: currentProjectId,
+                    service_id: HistoryHandler.SERVICE_IDENTIFIER,
+                    key: 'api_key',
+                    value: uniqueKey,
+                    updated_at: new Date().toISOString()
+                };
+                await supabase.from('settings').insert(payload);
+            }
+
+            // 4. Asegurar existencia de variables obligatorias (priorizando ENV > DB_MASTER)
+            const mandatoryKeys = [
+                { key: 'OPENAI_API_KEY', defaultValue: process.env.OPENAI_API_KEY || 'PENDING' },
+                { key: 'OPENAI_ADMIN_API_KEY', defaultValue: process.env.OPENAI_ADMIN_API_KEY || 'PENDING' },
+                { key: 'OPENAI_API_KEY_TOOLS', defaultValue: process.env.OPENAI_API_KEY_TOOLS || 'PENDING' },
+                { key: 'ASSISTANT_NAME', defaultValue: process.env.ASSISTANT_NAME || 'Bot' },
+                { key: 'SHEET_ID_UPDATE', defaultValue: 'PENDING' },
+                { key: 'DOCX_ID_UPDATE', defaultValue: 'PENDING' },
+                { key: 'GOOGLE_PRIVATE_KEY', defaultValue: 'PENDING' },
+                { key: 'GOOGLE_CLIENT_EMAIL', defaultValue: 'PENDING' },
+                { key: 'SHEET_ID_RESUMEN', defaultValue: 'PENDING' },
+                { key: 'SHEET_RESUMEN_RANGE', defaultValue: 'Hoja1!A1' }
+            ];
+
+
+            for (const item of mandatoryKeys) {
+                const { data: existingEntry } = await supabase
+                    .from('settings')
+                    .select('key, value')
+                    .eq('project_id', currentProjectId)
+                    .eq('service_id', HistoryHandler.SERVICE_IDENTIFIER)
+                    .eq('key', item.key)
+                    .maybeSingle();
+
+                if (!existingEntry || existingEntry.value === 'PENDING') {
+                    // console.log(`🔍 [Bootstrap] Variable '${item.key}' ${!existingEntry ? 'faltante' : 'en estado PENDING'}. Buscando valor...`);
+
+                    let finalValue = item.defaultValue;
+
+                    // Si el valor en env es 'PENDING', intentamos buscar en el proyecto maestro 'defaul'
+                    // EXCEPTO para llaves críticas de OpenAI que deben ser únicas por proyecto
+                    const sensitiveKeys = ['OPENAI_API_KEY', 'OPENAI_ADMIN_API_KEY', 'OPENAI_API_KEY_TOOLS'];
+
+                    if (finalValue === 'PENDING' && !sensitiveKeys.includes(item.key)) {
+                        const { data: masterVal } = await supabase
+                            .from('settings')
+                            .select('value')
+                            .eq('project_id', MASTER_ID)
+                            .eq('service_id', 'default_service')
+                            .eq('key', item.key)
+                            .maybeSingle();
+
+                        if (masterVal && masterVal.value) {
+                            console.log(`🎯 [Bootstrap] Valor para '${item.key}' recuperado desde el maestro '${MASTER_ID}'.`);
+                            finalValue = masterVal.value;
+                        }
+                    }
+
+                    if (finalValue !== 'PENDING') {
+                        // console.log(`🆕 [Bootstrap] ${!existingEntry ? 'Creando' : 'Actualizando'} variable '${item.key}' con valor: ${finalValue.substring(0, 10)}...`);
+                        const payload: any = {
+                            project_id: currentProjectId,
+                            service_id: HistoryHandler.SERVICE_IDENTIFIER,
+                            key: item.key,
+                            value: finalValue,
+                            updated_at: new Date().toISOString()
+                        };
+                        await supabase.from('settings').upsert(payload, { onConflict: 'project_id,service_id,key' });
+                    }
+                }
+            }
+
+        } catch (err) {
+            console.error('❌ [Bootstrap] Error crítico en Bootstrap:', err);
+        }
+    }
+
+    /**
+     * Carga todas las variables de la tabla 'settings' del proyecto actual
+     * directamente al entorno global 'process.env'.
+     * Esto permite que flujos que dependen de process.env funcionen sin refactorización masiva.
+     */
+    static async loadSettingsIntoProcessEnv() {
+        try {
+            const currentProjectId = this.PROJECT_IDENTIFIER;
+            const currentServiceId = process.env.SERVICE_ID || process.env.RAILWAY_SERVICE_ID || this.SERVICE_IDENTIFIER;
+            console.log(`📡 [HistoryHandler] Sincronizando settings de DB -> process.env (Project: ${currentProjectId}, Service: ${currentServiceId})...`);
+
+            let query = supabase
+                .from('settings')
+                .select('key, value, service_id')
+                .eq('project_id', currentProjectId);
+
+            if (currentServiceId && currentServiceId !== 'default_service') {
+                query = query.in('service_id', [currentServiceId, 'default_service']);
+            }
+
+            const { data, error } = await query;
+
+            if (error) throw error;
+
+            if (data && data.length > 0) {
+                // Agrupar para dar prioridad a la específica del servicio
+                const selectedSettings: Record<string, typeof data[0]> = {};
+
+                data.forEach(setting => {
+                    const existing = selectedSettings[setting.key];
+                    if (!existing) {
+                        selectedSettings[setting.key] = setting;
+                    } else {
+                        // Si la existente es default_service y la nueva es específica, la sobreescribimos
+                        if (existing.service_id === 'default_service' && setting.service_id !== 'default_service') {
+                            selectedSettings[setting.key] = setting;
+                        }
+                    }
+                });
+
+                let count = 0;
+                Object.values(selectedSettings).forEach(setting => {
+                    if (setting.value && setting.value !== 'PENDING') {
+                        const isFixed = HistoryHandler.FIXED_KEYS.includes(setting.key);
+                        const envVal = process.env[setting.key];
+                        const isEnvInvalid = !envVal || envVal.trim() === '' || envVal.trim() === 'PENDING';
+
+                        if (isFixed && !isEnvInvalid) {
+                            if (envVal !== setting.value) {
+                                // console.log(`ℹ️ [HistoryHandler] Manteniendo valor de entorno estático para la llave fija '${setting.key}' (ignorando valor DB: ${setting.value.substring(0, 5)}...)`);
+                            }
+                        } else {
+                            if (envVal !== setting.value) {
+                                // console.log(`🔄 [HistoryHandler] Sobreescribiendo '${setting.key}' con valor de Base de Datos (prioridad DB).`);
+                            }
+                            process.env[setting.key] = setting.value;
+                            count++;
+                        }
+                    }
+                });
+                console.log(`✅ [HistoryHandler] ${count} variables de entorno sincronizadas desde DB (prioridad base de datos aplicada con resolución de conflictos de servicio).`);
+            } else {
+                console.log(`⚠️ [HistoryHandler] No se encontraron settings en DB para el proyecto ${currentProjectId}.`);
+            }
+        } catch (err) {
+            console.error('❌ [HistoryHandler] Error cargando settings a process.env:', err);
+        }
+    }
+
+    // --- User Management ---
+
+    static async createUser(username: string, pass: string, role: string = 'subuser') {
+        try {
+            const { data, error } = await supabase
+                .from('users')
+                .insert({
+                    project_id: HistoryHandler.PROJECT_IDENTIFIER,
+                    username,
+                    password: pass,
+                    role
+                })
+                .select()
+                .single();
+            if (error) throw error;
+            return { success: true, user: data };
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en createUser:', err);
+            return { success: false, error: err.message };
+        }
+    }
+
+    static async updateUserRole(userId: string, role: string) {
+        return this.updateUser(userId, { role });
+    }
+
+    static async updateUser(userId: string, updates: { role?: string; username?: string; password?: string }) {
+        try {
+            const cleanUpdates: any = {};
+            if (updates.role) cleanUpdates.role = updates.role;
+            if (updates.username) cleanUpdates.username = updates.username;
+            if (updates.password) cleanUpdates.password = updates.password;
+
+            const { data, error } = await supabase
+                .from('users')
+                .update(cleanUpdates)
+                .eq('id', userId)
+                .eq('project_id', HistoryHandler.PROJECT_IDENTIFIER)
+                .select()
+                .single();
+            if (error) throw error;
+            return { success: true, user: data };
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en updateUser:', err);
+            return { success: false, error: err.message };
+        }
+    }
+
+    static async deleteUser(userId: string) {
+        try {
+            const { error } = await supabase
+                .from('users')
+                .delete()
+                .eq('id', userId)
+                .eq('project_id', HistoryHandler.PROJECT_IDENTIFIER);
+            if (error) throw error;
+            return { success: true };
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en deleteUser:', err);
+            return { success: false, error: err.message };
+        }
+    }
+
+    static async listUsers() {
+        try {
+            const { data, error } = await supabase
+                .from('users')
+                .select('id, username, role, created_at')
+                .eq('project_id', HistoryHandler.PROJECT_IDENTIFIER);
+            if (error) throw error;
+            return data || [];
+        } catch (err) {
+            console.error('[HistoryHandler] Error en listUsers:', err);
+            return [];
+        }
+    }
+
+    static async verifyUser(username: string, pass: string) {
+        try {
+            const cleanUser = (username || '').trim();
+            const cleanPass = (pass || '').trim();
+
+            const { data, error } = await supabase
+                .from('users')
+                .select('*')
+                .eq('project_id', HistoryHandler.PROJECT_IDENTIFIER)
+                .ilike('username', cleanUser)
+                .eq('password', cleanPass)
+                .maybeSingle();
+            if (error) throw error;
+            return data || null;
+        } catch (err) {
+            console.error('[HistoryHandler] Error en verifyUser:', err);
+            return null;
+        }
+    }
+
+    static async getUserById(userId: string, projectId: string | null = null) {
+        try {
+            let query = supabase
+                .from('users')
+                .select('*')
+                .eq('id', userId);
+
+            if (projectId) {
+                query = query.eq('project_id', projectId);
+            }
+
+            const { data, error } = await query.maybeSingle();
+            if (error) throw error;
+            return data || null;
+        } catch (err) {
+            console.error('[HistoryHandler] Error en getUserById:', err);
+            return null;
+        }
+    }
+
+    static async assignChatToUser(rawChatId: string, userId: string | null, projectId: string | null = null, serviceId: string | null = null) {
+        const chatId = this.normalizeId(rawChatId);
+        const currentProjectId = projectId || HistoryHandler.PROJECT_IDENTIFIER;
+        const currentServiceId = serviceId || HistoryHandler.SERVICE_IDENTIFIER;
+        try {
+            let query = supabase
+                .from('chats')
+                .update({ assigned_to: userId })
+                .eq('id', chatId)
+                .eq('project_id', currentProjectId);
+            if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                query = query.eq('service_id', currentServiceId);
+            }
+            const { error } = await query;
+            if (error) throw error;
+
+            // Emitir evento para actualización en tiempo real
+            historyEvents.emit('contact_updated', {
+                chatId,
+                project_id: currentProjectId,
+                service_id: currentServiceId,
+                details: { assigned_to: userId }
+            });
+
+            return { success: true };
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en assignChatToUser:', err);
+            return { success: false, error: err.message };
+        }
+    }
+
+    /**
+     * Resuelve el project_id a partir del número de teléfono o ID del bot.
+     * Útil para ruteo multitenant dinámico.
+     */
+    static async getProjectIdByRecipient(recipientId: string | null): Promise<string | null> {
+        if (!recipientId || !supabase) return null;
+
+        const cleanRecipient = recipientId.trim();
+        const digitsOnly = cleanRecipient.replace(/\D/g, '');
+
+        try {
+            // 1. Buscar por phone_number_id o waba_id en meta_onboarding
+            const { data: metaData } = await supabase
+                .from('meta_onboarding')
+                .select('project_id')
+                .or(`phone_number_id.eq.${cleanRecipient},waba_id.eq.${cleanRecipient}`)
+                .maybeSingle();
+
+            if (metaData?.project_id) return metaData.project_id;
+
+            // 2. Buscar por phone_number_id o waba_id en routing_table
+            const { data: routeData } = await supabase
+                .from('routing_table')
+                .select('project_id')
+                .or(`phone_number_id.eq.${cleanRecipient},waba_id.eq.${cleanRecipient}`)
+                .maybeSingle();
+
+            if (routeData?.project_id) return routeData.project_id;
+
+            // 3. Buscar por coincidencia con display_phone_number en meta_onboarding (limpiando caracteres)
+            if (digitsOnly.length >= 7) {
+                const { data: allOnboarding } = await supabase
+                    .from('meta_onboarding')
+                    .select('project_id, onboarding_data');
+
+                if (allOnboarding && allOnboarding.length > 0) {
+                    for (const row of allOnboarding) {
+                        const displayNum = row.onboarding_data?.display_phone_number;
+                        if (displayNum) {
+                            const cleanDisplay = String(displayNum).replace(/\D/g, '');
+                            if (cleanDisplay && (cleanDisplay.includes(digitsOnly) || digitsOnly.includes(cleanDisplay))) {
+                                return row.project_id;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 4. Fallback: buscar en settings por un valor que coincida (ej: WABA_NUMBER o PHONE_NUMBER_ID)
+            const { data: settingsData } = await supabase
+                .from('settings')
+                .select('project_id')
+                .eq('value', cleanRecipient)
+                .maybeSingle();
+
+            if (settingsData?.project_id) return settingsData.project_id;
+
+            return null;
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en getProjectIdByRecipient:', err?.message || err);
+            return null;
+        }
+    }
+
+    /**
+     * Resuelve el service_id a partir del número de teléfono o ID del bot.
+     * Útil para ruteo multitenant dinámico.
+     */
+    static async getServiceIdByRecipient(recipientId: string | null): Promise<string | null> {
+        if (!recipientId || !supabase) return null;
+
+        const cleanRecipient = recipientId.trim();
+        const digitsOnly = cleanRecipient.replace(/\D/g, '');
+
+        try {
+            // 1. Buscar por phone_number_id o waba_id en meta_onboarding
+            const { data: metaData } = await supabase
+                .from('meta_onboarding')
+                .select('service_id')
+                .or(`phone_number_id.eq.${cleanRecipient},waba_id.eq.${cleanRecipient}`)
+                .maybeSingle();
+
+            if (metaData?.service_id) return metaData.service_id;
+
+            // 2. Buscar por phone_number_id o waba_id en routing_table
+            const { data: routeData } = await supabase
+                .from('routing_table')
+                .select('service_id')
+                .or(`phone_number_id.eq.${cleanRecipient},waba_id.eq.${cleanRecipient}`)
+                .maybeSingle();
+
+            if (routeData?.service_id) return routeData.service_id;
+
+            // 3. Buscar por coincidencia con display_phone_number en meta_onboarding (limpiando caracteres)
+            if (digitsOnly.length >= 7) {
+                const { data: allOnboarding } = await supabase
+                    .from('meta_onboarding')
+                    .select('service_id, onboarding_data');
+
+                if (allOnboarding && allOnboarding.length > 0) {
+                    for (const row of allOnboarding) {
+                        const displayNum = row.onboarding_data?.display_phone_number;
+                        if (displayNum) {
+                            const cleanDisplay = String(displayNum).replace(/\D/g, '');
+                            if (cleanDisplay && (cleanDisplay.includes(digitsOnly) || digitsOnly.includes(cleanDisplay))) {
+                                return row.service_id;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 4. Fallback: buscar en settings por un valor que coincida (ej: WABA_NUMBER o PHONE_NUMBER_ID)
+            const { data: settingsData } = await supabase
+                .from('settings')
+                .select('service_id')
+                .eq('value', cleanRecipient)
+                .maybeSingle();
+
+            if (settingsData?.service_id) return settingsData.service_id;
+
+            return null;
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en getServiceIdByRecipient:', err?.message || err);
+            return null;
+        }
+    }
+
+    /**
+     * Obtiene el project_id asociado a un chat_id específico
+     */
+    static async getProjectIdByChatId(chatId: string): Promise<string | null> {
+        if (!chatId || !supabase) return null;
+        try {
+            const normalizedChatId = this.normalizeId(chatId);
+            const { data, error } = await supabase
+                .from('chats')
+                .select('project_id')
+                .eq('id', normalizedChatId)
+                .maybeSingle();
+
+            if (error) throw error;
+            return data?.project_id || null;
+        } catch (err) {
+            console.error(`[HistoryHandler] Error en getProjectIdByChatId para ${chatId}:`, err);
+            return null;
+        }
+    }
+
+    /**
+     * Sincronización masiva de etiquetas (tags)
+     */
+    static async syncTags(tags: any[], forcedProjectId?: string, forcedServiceId?: string | null) {
+        if (!supabase) return { success: false, error: 'Supabase not initialized' };
+        const targetProjectId = forcedProjectId || HistoryHandler.PROJECT_IDENTIFIER;
+        const targetServiceId = forcedServiceId || HistoryHandler.SERVICE_IDENTIFIER;
+
+        try {
+            if (tags.length === 0) return { success: true, data: [] };
+
+            const tagsToUpsert = tags.map(t => {
+                const upsertData: any = {
+                    project_id: targetProjectId,
+                    name: t.name,
+                    color: t.color || '#6366f1',
+                    created_at: new Date().toISOString()
+                };
+                if (targetServiceId && targetServiceId !== 'default' && targetServiceId !== 'default_service') {
+                    upsertData.service_id = targetServiceId;
+                }
+                return upsertData;
+            });
+
+            // Usamos onConflict 'project_id,name' para no duplicar etiquetas con el mismo nombre en el mismo proyecto
+            const { data, error } = await supabase
+                .from('tags')
+                .upsert(tagsToUpsert, { onConflict: 'project_id,name' })
+                .select();
+
+            if (error) throw error;
+            return { success: true, data };
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en syncTags:', err);
+            return { success: false, error: err.message };
+        }
+    }
+
+    /**
+     * Sincronización masiva de contactos (chats)
+     */
+    static async syncChats(chats: any[], forcedProjectId?: string, forcedServiceId?: string | null) {
+        if (!supabase) return { success: false, error: 'Supabase not initialized' };
+        const targetProjectId = forcedProjectId || HistoryHandler.PROJECT_IDENTIFIER;
+        const targetServiceId = forcedServiceId || HistoryHandler.SERVICE_IDENTIFIER;
+
+        try {
+            if (chats.length === 0) return { success: true, data: [] };
+
+            // Deduplicar en memoria por cleanId para evitar "ON CONFLICT DO UPDATE command cannot affect row a second time" en Postgres
+            const chatsMap = new Map<string, any>();
+            for (const c of chats) {
+                const rawId = String(c.id || c.phone || '').trim();
+                const cleanId = rawId.replace(/\D/g, '') || rawId;
+                if (!cleanId || cleanId.trim() === '') continue;
+
+                const existing = chatsMap.get(cleanId);
+                const upsertData: any = {
+                    id: cleanId,
+                    project_id: targetProjectId,
+                    name: c.name || (existing ? existing.name : null),
+                    type: c.type || 'whatsapp',
+                    last_message_at: c.last_message_at || new Date().toISOString(),
+                    metadata: c.metadata || (existing ? existing.metadata : {}),
+                    is_lead: c.is_lead !== undefined ? c.is_lead : (existing ? existing.is_lead : false),
+                    bot_enabled: c.bot_enabled !== undefined ? c.bot_enabled : (existing ? existing.bot_enabled : true),
+                    assigned_agent: c.assigned_agent || (existing ? existing.assigned_agent : 'asistente1')
+                };
+                if (targetServiceId && targetServiceId !== 'default' && targetServiceId !== 'default_service') {
+                    upsertData.service_id = targetServiceId;
+                } else {
+                    upsertData.service_id = HistoryHandler.SERVICE_IDENTIFIER;
+                }
+                chatsMap.set(cleanId, upsertData);
+            }
+
+            const chatsToUpsert = Array.from(chatsMap.values());
+
+            const { data, error } = await supabase
+                .from('chats')
+                .upsert(chatsToUpsert, { onConflict: 'id,project_id,service_id' })
+                .select();
+
+            if (error) throw error;
+            return { success: true, data };
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en syncChats:', err);
+            return { success: false, error: err.message };
+        }
+    }
+
+    /**
+     * Sincronización masiva de asociaciones chat-etiqueta
+     */
+    static async syncChatTags(associations: any[], forcedProjectId?: string, forcedServiceId?: string | null) {
+        if (!supabase) return { success: false, error: 'Supabase not initialized' };
+        const targetProjectId = forcedProjectId || HistoryHandler.PROJECT_IDENTIFIER;
+        const targetServiceId = forcedServiceId || HistoryHandler.SERVICE_IDENTIFIER;
+
+        try {
+            if (associations.length === 0) return { success: true, data: [] };
+
+            const associationsToUpsert = associations.map(a => {
+                const upsertData: any = {
+                    chat_id: a.chat_id,
+                    tag_id: a.tag_id,
+                    project_id: targetProjectId
+                };
+                if (targetServiceId && targetServiceId !== 'default' && targetServiceId !== 'default_service') {
+                    upsertData.service_id = targetServiceId;
+                }
+                return upsertData;
+            });
+
+            const { data, error } = await supabase
+                .from('chat_tags')
+                .upsert(associationsToUpsert, { onConflict: 'chat_id,tag_id,project_id' })
+                .select();
+            if (error) throw error;
+            return { success: true, data };
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en syncChatTags:', err);
+            return { success: false, error: err.message };
+        }
+    }
+
+    /**
+     * Obtiene todos los grupos de reporte virtual (WABA) para un proyecto.
+     */
+    static async getWabaReportGroups(projectId: string | null = null): Promise<any[]> {
+        if (!supabase) return [];
+        const targetProjectId = projectId || HistoryHandler.PROJECT_IDENTIFIER;
+        try {
+            const { data, error } = await supabase
+                .from('waba_report_groups')
+                .select('*')
+                .eq('project_id', targetProjectId)
+                .order('created_at', { ascending: true });
+            if (error) throw error;
+            return data || [];
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en getWabaReportGroups:', err.message);
+            return [];
+        }
+    }
+
+    /**
+     * Guarda o actualiza un grupo de reporte virtual (WABA).
+     */
+    static async saveWabaReportGroup(group: { id?: string, name: string, contacts: any[], jid?: string }, projectId: string | null = null) {
+        if (!supabase) return { success: false, error: 'Supabase not initialized' };
+        const targetProjectId = projectId || HistoryHandler.PROJECT_IDENTIFIER;
+        try {
+            const { id, name, contacts, jid } = group;
+            if (!name) return { success: false, error: 'El nombre del grupo es obligatorio.' };
+            if (!Array.isArray(contacts)) return { success: false, error: 'Los contactos deben ser un array.' };
+            if (contacts.length > 8) return { success: false, error: 'Un grupo puede tener como máximo 8 contactos.' };
+
+            const dataToSave: any = {
+                project_id: targetProjectId,
+                name,
+                contacts,
+                jid: jid || null,
+                updated_at: new Date().toISOString()
+            };
+
+            if (id) {
+                dataToSave.id = id;
+            }
+
+            const { data, error } = await supabase
+                .from('waba_report_groups')
+                .upsert(dataToSave, { onConflict: 'id' })
+                .select()
+                .single();
+
+            if (error) throw error;
+            return { success: true, data };
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en saveWabaReportGroup:', err.message);
+            return { success: false, error: err.message };
+        }
+    }
+
+    /**
+     * Elimina un grupo de reporte virtual (WABA).
+     */
+    static async deleteWabaReportGroup(id: string) {
+        if (!supabase) return { success: false, error: 'Supabase not initialized' };
+        try {
+            const { error } = await supabase
+                .from('waba_report_groups')
+                .delete()
+                .eq('id', id);
+            if (error) throw error;
+            return { success: true };
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en deleteWabaReportGroup:', err.message);
+            return { success: false, error: err.message };
+        }
+    }
+
+    /**
+     * Obtiene todos los mensajes rápidos para un proyecto.
+     */
+    static async getQuickMessages(projectId: string, serviceId: string | null = null): Promise<any[]> {
+        const currentProjectId = projectId || this.PROJECT_IDENTIFIER;
+        const currentServiceId = serviceId || this.SERVICE_IDENTIFIER;
+        if (process.env.STORAGE_MODE === "local") {
+            return LocalHistoryStore.getQuickMessages(currentProjectId);
+        }
+        try {
+            let query = supabase
+                .from('quick_messages')
+                .select('*')
+                .eq('project_id', currentProjectId);
+
+            if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                query = query.eq('service_id', currentServiceId);
+            }
+
+            const { data, error } = await query.order('created_at', { ascending: false });
+
+            if (error) throw error;
+            return data || [];
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en getQuickMessages:', err.message);
+            return [];
+        }
+    }
+
+    /**
+     * Crea un nuevo mensaje rápido para el proyecto.
+     */
+    static async createQuickMessage(projectId: string, title: string, message: string, serviceId: string | null = null): Promise<any> {
+        const currentProjectId = projectId || this.PROJECT_IDENTIFIER;
+        const currentServiceId = serviceId || this.SERVICE_IDENTIFIER;
+        if (process.env.STORAGE_MODE === "local") {
+            return LocalHistoryStore.createQuickMessage(currentProjectId, title, message);
+        }
+        try {
+            const insertData: any = {
+                project_id: currentProjectId,
+                title,
+                message,
+                created_at: new Date().toISOString()
+            };
+            if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                insertData.service_id = currentServiceId;
+            }
+
+            const { data, error } = await supabase
+                .from('quick_messages')
+                .insert(insertData)
+                .select()
+                .single();
+
+            if (error) throw error;
+            return data;
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en createQuickMessage:', err.message);
+            return null;
+        }
+    }
+
+    /**
+     * Elimina un mensaje rápido por su ID.
+     */
+    static async deleteQuickMessage(id: string, projectId: string, serviceId: string | null = null): Promise<boolean> {
+        const currentProjectId = projectId || this.PROJECT_IDENTIFIER;
+        const currentServiceId = serviceId || this.SERVICE_IDENTIFIER;
+        if (process.env.STORAGE_MODE === "local") {
+            return LocalHistoryStore.deleteQuickMessage(id, currentProjectId);
+        }
+        try {
+            let query = supabase
+                .from('quick_messages')
+                .delete()
+                .eq('id', id)
+                .eq('project_id', currentProjectId);
+
+            if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                query = query.eq('service_id', currentServiceId);
+            }
+
+            const { error } = await query;
+
+            if (error) throw error;
+            return true;
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en deleteQuickMessage:', err.message);
+            return false;
+        }
+    }
+
+    /**
+     * Registra una nueva notificación de sistema (ej. error de Meta).
+     */
+    static async createSystemNotification(
+        projectId: string,
+        serviceId: string | null,
+        type: string,
+        title: string,
+        description: string,
+        metadata: any = {}
+    ): Promise<any> {
+        const currentProjectId = projectId || this.PROJECT_IDENTIFIER;
+        const currentServiceId = serviceId || this.SERVICE_IDENTIFIER;
+
+        if (process.env.STORAGE_MODE === "local") {
+            return LocalHistoryStore.createSystemNotification(currentProjectId, currentServiceId, type, title, description, metadata);
+        }
+
+        try {
+            const insertData: any = {
+                project_id: currentProjectId,
+                service_id: currentServiceId,
+                type,
+                title,
+                description,
+                metadata,
+                read: false,
+                created_at: new Date().toISOString()
+            };
+
+            const { data, error } = await supabase
+                .from('system_notifications')
+                .insert(insertData)
+                .select()
+                .single();
+
+            if (error) throw error;
+
+            // Emitir evento en tiempo real para avisar al Backoffice (Socket.IO / Realtime)
+            historyEvents.emit('notification_created', { projectId: currentProjectId, serviceId: currentServiceId, notification: data });
+
+            return data;
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en createSystemNotification:', err.message);
+            return null;
+        }
+    }
+
+    /**
+     * Obtiene notificaciones de sistema paginadas filtrando por project_id y service_id.
+     */
+    static async getSystemNotifications(
+        projectId: string,
+        serviceId: string | null,
+        limit = 20,
+        offset = 0
+    ): Promise<any[]> {
+        const currentProjectId = projectId || this.PROJECT_IDENTIFIER;
+        const currentServiceId = serviceId || this.SERVICE_IDENTIFIER;
+
+        if (process.env.STORAGE_MODE === "local") {
+            return LocalHistoryStore.getSystemNotifications(currentProjectId, currentServiceId, limit, offset);
+        }
+
+        try {
+            let query = supabase
+                .from('system_notifications')
+                .select('*')
+                .eq('project_id', currentProjectId);
+
+            if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                query = query.eq('service_id', currentServiceId);
+            }
+
+            const { data, error } = await query
+                .order('created_at', { ascending: false })
+                .range(offset, offset + limit - 1);
+
+            if (error) throw error;
+            return data || [];
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en getSystemNotifications:', err.message);
+            return [];
+        }
+    }
+
+    /**
+     * Marca una o más notificaciones como leídas filtrando por project_id y service_id.
+     */
+    static async markNotificationsAsRead(
+        projectId: string,
+        serviceId: string | null,
+        notificationIds: string[]
+    ): Promise<boolean> {
+        const currentProjectId = projectId || this.PROJECT_IDENTIFIER;
+        const currentServiceId = serviceId || this.SERVICE_IDENTIFIER;
+
+        if (process.env.STORAGE_MODE === "local") {
+            return LocalHistoryStore.markNotificationsAsRead(currentProjectId, currentServiceId, notificationIds);
+        }
+
+        try {
+            let query = supabase
+                .from('system_notifications')
+                .update({ read: true })
+                .eq('project_id', currentProjectId)
+                .in('id', notificationIds);
+
+            if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                query = query.eq('service_id', currentServiceId);
+            }
+
+            const { error } = await query;
+            if (error) throw error;
+
+            historyEvents.emit('notifications_read', { projectId: currentProjectId, serviceId: currentServiceId, ids: notificationIds });
+            return true;
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en markNotificationsAsRead:', err.message);
+            return false;
+        }
+    }
+
+    /**
+     * Obtiene la cantidad de notificaciones no leídas filtrando por project_id y service_id.
+     */
+    static async getUnreadNotificationsCount(
+        projectId: string,
+        serviceId: string | null
+    ): Promise<number> {
+        const currentProjectId = projectId || this.PROJECT_IDENTIFIER;
+        const currentServiceId = serviceId || this.SERVICE_IDENTIFIER;
+
+        if (process.env.STORAGE_MODE === "local") {
+            return LocalHistoryStore.getUnreadNotificationsCount(currentProjectId, currentServiceId);
+        }
+
+        try {
+            let query = supabase
+                .from('system_notifications')
+                .select('id', { count: 'exact', head: true })
+                .eq('project_id', currentProjectId)
+                .eq('read', false);
+
+            if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                query = query.eq('service_id', currentServiceId);
+            }
+
+            const { count, error } = await query;
+            if (error) throw error;
+            return count || 0;
+        } catch (err: any) {
+            console.error('[HistoryHandler] Error en getUnreadNotificationsCount:', err.message);
+            return 0;
+        }
+    }
+
+}
+
+// Inicializar base de datos al cargar el modulo (Quitado para evitar race condition, se llama en app.ts main)
+// HistoryHandler.initDatabase();

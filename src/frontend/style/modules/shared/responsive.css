@@ -1,0 +1,713 @@
+@layer components {
+  @media (max-width: 1023px) {
+    #view-root {
+      padding-top: 0;
+    }
+
+    .crm-main-container {
+      min-height: 100dvh !important;
+    }
+/* Ã¢â€â‚¬Ã¢â€â‚¬ crm-main-container: padding reducido Ã¢â€â‚¬Ã¢â€â‚¬ */
+    .crm-main-container {
+      padding: 1rem !important;
+    }
+
+    /* Ã¢â€â‚¬Ã¢â€â‚¬ System config responsive Ã¢â€â‚¬Ã¢â€â‚¬ */
+    #variables-form {
+      padding: 1rem 1rem 5rem !important;
+    }
+
+    .variables-grid {
+      grid-template-columns: 1fr !important;
+      margin-top: 0.75rem !important;
+      gap: 0.75rem !important;
+    }
+
+    .variable-group-span2 {
+      grid-column: span 1 !important;
+    }
+
+    .variable-group {
+      padding: 0.75rem !important;
+      gap: 0.5rem !important;
+    }
+
+    .variable-group h3 {
+      font-size: 0.6rem !important;
+    }
+
+    .variable-group .description {
+      font-size: 0.6rem !important;
+    }
+
+    .trigger-card {
+      @apply flex-col items-start gap-2;
+    }
+
+    .trigger-card .btn {
+      @apply w-full justify-center text-xs px-3 py-2;
+      white-space: nowrap;
+    }
+
+    .section-header {
+      margin-top: 1.5rem !important;
+    }
+
+    .section-header:first-child {
+      margin-top: 0 !important;
+    }
+
+    .section-header h2 {
+      font-size: 0.8rem !important;
+    }
+
+    .trigger-card-title {
+      font-size: 0.8rem !important;
+    }
+
+    .actions {
+      @apply flex-col;
+      gap: 0.5rem !important;
+      margin-top: 1.5rem !important;
+    }
+
+    .actions .btn,
+    .actions .btn-outline {
+      @apply w-full justify-center;
+    }
+
+    .number-stepper {
+      width: 100% !important;
+    }
+
+    .stepper-input {
+      flex: 1 !important;
+      width: auto !important;
+    }
+
+    /* Ã¢â€â‚¬Ã¢â€â‚¬ Section headers: centrados en mobile Ã¢â€â‚¬Ã¢â€â‚¬ */
+    .section-header-wrap {
+      flex-direction: column !important;
+      align-items: center !important;
+      text-align: center !important;
+      gap: 0.5rem !important;
+      margin-bottom: 1rem !important;
+    }
+
+    .section-header-inner {
+      flex-direction: column !important;
+      align-items: center !important;
+      gap: 0.5rem !important;
+    }
+
+    .section-header-inner h1 {
+      font-size: 1.25rem !important;
+    }
+
+    .section-meta {
+      display: block !important;
+      font-size: 0.65rem;
+    }
+
+    .section-desc {
+      text-align: center !important;
+      margin-bottom: 1.25rem !important;
+    }
+
+    /* Ã¢â€â‚¬Ã¢â€â‚¬ Backoffice messaging: split Ã¢â€ â€™ stack Ã¢â€â‚¬Ã¢â€â‚¬ */
+    #sidebar {
+      width: 100% !important;
+      flex-shrink: 0;
+      overflow-y: auto !important;
+      display: block !important;
+    }
+
+    #chat-list {
+      overflow-y: visible !important;
+      height: auto !important;
+      flex: none !important;
+    }
+
+    #main-content {
+      position: absolute !important;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      transform: translateX(100%);
+      transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+      z-index: 5;
+    }
+
+    body.mobile-chat-active #main-content {
+      transform: translateX(0);
+    }
+
+    body.mobile-chat-active #sidebar {
+      display: none !important;
+    }
+
+    #messages {
+      padding: 24px 4% !important;
+    }
+
+    /* Back button - solo visible en mobile */
+    .mobile-back-btn {
+      display: flex !important;
+      align-items: center;
+      justify-content: center;
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      border: 1px solid rgba(255, 255, 255, 0.13);
+      background: transparent;
+      color: #555;
+      font-size: 15px;
+      cursor: pointer;
+      flex-shrink: 0;
+      margin-right: 4px;
+    }
+
+    [data-theme="dark"] .mobile-back-btn {
+      color: rgba(255, 255, 255, 0.7);
+    }
+
+    .mobile-back-btn:hover {
+      background: rgba(0, 0, 0, 0.06);
+    }
+
+    /* Ã¢â€â‚¬Ã¢â€â‚¬ Prompt panel: full-width en mobile Ã¢â€â‚¬Ã¢â€â‚¬ */
+    .prompt-panel {
+      width: 100% !important;
+      right: -100% !important;
+      top: 52px !important;
+      height: calc(100% - 52px) !important;
+    }
+
+    .prompt-panel.active {
+      right: 0 !important;
+    }
+
+    .prompt-panel-footer {
+      @apply flex-col items-stretch gap-2;
+    }
+
+    .prompt-footer-actions {
+      @apply w-full justify-end;
+    }
+
+    .prompt-panel-header {
+      @apply px-4 py-4;
+    }
+
+    .prompt-panel-content {
+      @apply p-3;
+    }
+
+    /* Ã¢â€â‚¬Ã¢â€â‚¬ Tasks dashboard panel: top fix Ã¢â€â‚¬Ã¢â€â‚¬ */
+    .tasks-dashboard-panel {
+      top: 52px !important;
+      height: calc(100dvh - 52px) !important;
+    }
+
+    /* Ã¢â€â‚¬Ã¢â€â‚¬ Panels: full-width en mobile Ã¢â€â‚¬Ã¢â€â‚¬ */
+    .tickets-panel,
+    #meta-panel,
+    #leads-panel,
+    #crm-panel {
+      width: 100% !important;
+      top: 52px !important;
+      height: calc(100% - 52px) !important;
+      border-left: none !important;
+      border-top: 3px solid #0078D4;
+    }
+
+    .modal-grid {
+      grid-template-columns: 1fr !important;
+    }
+
+    .modal-header h3,
+    .modal-header-top h3 {
+      font-size: 0.95rem !important;
+    }
+
+    .modal-section {
+      margin-bottom: 0.875rem !important;
+    }
+
+    .modal-section label {
+      font-size: 0.65rem !important;
+      margin-bottom: 0.5rem !important;
+    }
+
+    .form-actions-row .btn,
+    .modal-action-row .btn {
+      width: 100% !important;
+    }
+
+    .btn-flex-1,
+    .btn-flex-2 {
+      flex: unset !important;
+      width: 100% !important;
+    }
+
+    /* Panel header compacto */
+    .panel-header {
+      @apply px-4 py-3;
+    }
+
+    .panel-header h3 {
+      font-size: 0.9rem;
+    }
+
+    /* Ã¢â€â‚¬Ã¢â€â‚¬ Docs view Ã¢â€â‚¬Ã¢â€â‚¬ */
+    .docs-main {
+      padding: 0 !important;
+    }
+
+    .docs-content-area {
+      padding: 1rem;
+    }
+
+    .docs-content-area .prose {
+      font-size: 0.85rem !important;
+    }
+
+    .docs-content-area .prose h1 {
+      font-size: 1.25rem !important;
+    }
+
+    .docs-content-area .prose h2 {
+      font-size: 1rem !important;
+    }
+
+    .docs-content-area .prose h3 {
+      font-size: 0.875rem !important;
+    }
+
+    .docs-content-area .prose pre {
+      font-size: 0.7rem !important;
+      overflow-x: auto;
+      max-width: 100%;
+    }
+
+    .docs-content-area .prose code {
+      font-size: 0.7rem !important;
+      word-break: break-word;
+    }
+
+    /* Ã¢â€â‚¬Ã¢â€â‚¬ Modal Meta (Centro de Plantillas) mobile Ã¢â€â‚¬Ã¢â€â‚¬ */
+    #bulk-modal {
+      align-items: flex-end !important;
+    }
+
+    .meta-modal-content {
+      width: 100vw !important;
+      max-width: 100vw !important;
+      height: 95dvh !important;
+      max-height: 95dvh !important;
+      border-radius: 20px 20px 0 0 !important;
+      margin: 0 !important;
+      padding: 0 !important;
+    }
+
+    .meta-modal-content .modal-header {
+      padding: 1rem 1.25rem 0.875rem !important;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+    }
+
+    .meta-modal-content .modal-header h3 {
+      font-size: 0.95rem !important;
+    }
+
+    /* Tabs: tab + toggle en la misma fila */
+    .meta-tabs-bar {
+      flex-direction: row !important;
+      align-items: center !important;
+      justify-content: space-between !important;
+      gap: 0 !important;
+      padding: 0.5rem 0.875rem !important;
+    }
+
+    .meta-tab {
+      padding: 0.5rem 0 !important;
+      font-size: 0.85rem !important;
+      border-radius: 0 !important;
+      border-bottom: none !important;
+      background: transparent !important;
+    }
+
+    .meta-badge-bar {
+      width: 100% !important;
+      border: none !important;
+      border-radius: 0 !important;
+      background: rgba(6, 104, 225, 0.05) !important;
+      border-top: 1px solid rgba(6, 104, 225, 0.12) !important;
+      padding: 0.5rem 1rem !important;
+      gap: 1rem !important;
+      justify-content: flex-start !important;
+    }
+
+    .meta-badge-title {
+      display: none !important;
+    }
+
+    .meta-link-item {
+      font-size: 0.78rem !important;
+      gap: 0.3rem !important;
+      white-space: nowrap !important;
+    }
+
+    .meta-badge-bar {
+      flex-wrap: nowrap !important;
+      gap: 0.5rem !important;
+    }
+
+    @media (max-width: 390px) {
+      .meta-link-item {
+        font-size: 0.65rem !important;
+      }
+
+      .meta-badge-bar {
+        gap: 0.4rem !important;
+        padding: 0.5rem 0.625rem !important;
+      }
+    }
+
+    .meta-library-badge {
+      display: none !important;
+    }
+
+    /* Cards: 1 columna, sin overflow */
+    .meta-scroll-area {
+      overflow-x: hidden !important;
+    }
+
+    .meta-grid {
+      grid-template-columns: 1fr !important;
+      padding: 0.875rem !important;
+      gap: 0.75rem !important;
+    }
+
+    .meta-card {
+      min-height: 140px !important;
+      padding: 14px !important;
+    }
+
+    .meta-card-name {
+      font-size: 0.88rem !important;
+    }
+
+    .meta-card-desc {
+      font-size: 0.75rem !important;
+      margin-bottom: 0.75rem !important;
+    }
+
+    /* Detail view: apilado */
+    #view-template-detail {
+      padding: 1rem !important;
+    }
+
+    .tpl-name-header {
+      font-size: 1.1rem !important;
+    }
+
+    .tpl-name-row {
+      flex-wrap: wrap !important;
+      gap: 0.5rem !important;
+      margin-bottom: 0.75rem !important;
+    }
+
+    .tpl-detail-badges {
+      flex-wrap: wrap !important;
+      gap: 0.4rem !important;
+    }
+
+    .tpl-detail-back-btn {
+      margin-bottom: 0.5rem !important;
+    }
+
+    /* /meta view layout mobile */
+    .meta-onboarding-wrap {
+      margin: 0.75rem auto !important;
+      padding: 1.25rem 1rem !important;
+    }
+
+    .meta-onboarding-wrap>div:first-child {
+      font-size: 2.5rem !important;
+      margin-bottom: 0.625rem !important;
+    }
+
+    .meta-onboarding-wrap>div:nth-child(2) {
+      margin-bottom: 0.875rem !important;
+    }
+
+    .meta-onboarding-wrap>div:nth-child(2) h2 {
+      font-size: 1.25rem !important;
+    }
+
+    .meta-onboarding-wrap>div:nth-child(3) {
+      padding: 0.875rem 1rem !important;
+      margin-bottom: 0.875rem !important;
+    }
+
+    .meta-onboarding-wrap>div:nth-child(3) ul {
+      font-size: 0.82rem !important;
+    }
+
+    .meta-onboarding-wrap button.btn-primary {
+      font-size: 0.88rem !important;
+      border-radius: 12px !important;
+    }
+
+    @media (max-width: 390px) {
+      .meta-onboarding-wrap {
+        padding: 1rem 0.875rem !important;
+        margin: 0.5rem auto !important;
+      }
+
+      .meta-onboarding-wrap>div:nth-child(2) h2 {
+        font-size: 1.1rem !important;
+      }
+
+      .meta-onboarding-wrap>div:nth-child(2) {
+        margin-bottom: 0.625rem !important;
+      }
+
+      .meta-onboarding-wrap>div:nth-child(3) {
+        padding: 0.75rem !important;
+        margin-bottom: 0.75rem !important;
+      }
+
+      .meta-onboarding-wrap>div:nth-child(3) ul {
+        font-size: 0.78rem !important;
+        gap: 2px !important;
+      }
+
+      .meta-onboarding-wrap button.btn-primary {
+        padding: 10px 16px !important;
+        font-size: 0.85rem !important;
+      }
+    }
+
+    .meta-view-body {
+      padding: 0.875rem !important;
+    }
+
+    .meta-view-panel {
+      margin-bottom: 1rem !important;
+    }
+
+    .meta-tabs-bar {
+      padding: 0.625rem 0.875rem !important;
+      gap: 0.5rem !important;
+      flex-wrap: wrap !important;
+    }
+
+    .meta-panel-body {
+      height: 380px !important;
+    }
+
+    .meta-view-panel.collapsed .meta-panel-body {
+      height: 0 !important;
+    }
+
+    #view-my-templates,
+    #view-template-detail {
+      height: 100% !important;
+    }
+
+    .meta-preview-overlay {
+      max-height: 260px !important;
+    }
+
+    /* Detail view mobile: compactar steps y header */
+    .tpl-name-compact {
+      font-size: 1.05rem !important;
+    }
+
+    .tpl-compact-header {
+      flex-direction: column !important;
+      align-items: center !important;
+      gap: 0.4rem !important;
+      width: 100% !important;
+    }
+
+    #btn-edit-in-meta {
+      order: -1 !important;
+    }
+
+    .tpl-name-compact {
+      text-align: center !important;
+    }
+
+    .tpl-detail-badges {
+      flex-direction: column !important;
+      align-items: center !important;
+      gap: 0.3rem !important;
+    }
+
+    .bulk-step-label {
+      font-size: 0.7rem !important;
+    }
+
+    .bulk-step-label i {
+      display: none !important;
+    }
+
+    .bulk-step-btn {
+      font-size: 0.75rem !important;
+      padding: 8px 6px !important;
+    }
+
+    .bulk-step-file {
+      font-size: 0.65rem !important;
+      padding: 6px 4px !important;
+      min-width: 0 !important;
+      width: 0 !important;
+      flex: 1 !important;
+    }
+
+    .bulk-steps-grid {
+      gap: 0.625rem !important;
+      grid-template-columns: 1fr !important;
+    }
+
+    .bulk-compact-body {
+      gap: 0.875rem !important;
+    }
+
+    .bulk-filter-date-grid {
+      gap: 0.5rem !important;
+      grid-template-columns: 1fr !important;
+    }
+
+    .tpl-detail-badges {
+      gap: 0.3rem !important;
+    }
+
+    .tpl-info-badge {
+      font-size: 0.68rem !important;
+      padding: 2px 6px !important;
+    }
+  }
+
+  /* Ã¢â€â‚¬Ã¢â€â‚¬ Tablet (769px - 1024px) Ã¢â€â‚¬Ã¢â€â‚¬ */
+  @media (min-width: 769px) and (max-width: 1024px) {
+
+    .tickets-panel,
+    #leads-panel {
+      width: 380px !important;
+    }
+
+    .modal-content-lg {
+      max-width: 90vw !important;
+    }
+
+    /* System config tablet */
+    #variables-form {
+      padding: 1.5rem 1.75rem !important;
+    }
+
+    .variables-grid {
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)) !important;
+    }
+
+    .variable-group-span2 {
+      grid-column: span 2;
+    }
+
+    .trigger-card {
+      @apply flex-col items-start gap-3;
+    }
+
+    .trigger-card .btn {
+      @apply w-full justify-center;
+    }
+
+    /* Ã¢â€â‚¬Ã¢â€â‚¬ Modal Meta (Centro de Plantillas) tablet Ã¢â€â‚¬Ã¢â€â‚¬ */
+    .meta-modal-content {
+      max-width: 94vw !important;
+      height: 88vh !important;
+    }
+
+    .meta-badge-bar {
+      gap: 0.875rem !important;
+      padding: 0.5rem 1rem !important;
+    }
+
+    .meta-badge-title {
+      display: none !important;
+    }
+
+    .meta-link-item {
+      font-size: 0.8rem !important;
+    }
+
+    .meta-grid {
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)) !important;
+    }
+
+    .tpl-detail-grid {
+      gap: 1.5rem !important;
+    }
+
+    .tpl-name-header {
+      font-size: 1.6rem !important;
+    }
+
+    /* /meta view layout tablet */
+    .meta-view-body {
+      padding: 1.25rem 1.5rem !important;
+    }
+
+    /* Prompt panel tablet */
+    .prompt-panel {
+      width: 90% !important;
+      right: -90% !important;
+    }
+
+    .prompt-panel.active {
+      right: 0 !important;
+    }
+
+    /* Docs view tablet */
+    .docs-content-area {
+      padding: 1.5rem;
+    }
+
+    .docs-content-area .prose {
+      font-size: 0.9rem !important;
+    }
+
+    .docs-content-area .prose h1 {
+      font-size: 1.4rem !important;
+    }
+
+    .docs-content-area .prose h2 {
+      font-size: 1.1rem !important;
+    }
+
+    .docs-content-area .prose h3 {
+      font-size: 0.95rem !important;
+    }
+
+    .docs-content-area .prose pre,
+    .docs-content-area .prose code {
+      font-size: 0.78rem !important;
+    }
+  }
+
+  @media (min-width: 1024px) {
+    body #view-root {
+      padding-top: 0 !important;
+    }
+  }
+
+  @media (max-width: 1023px) {
+    #view-root {
+      margin-left: 0 !important;
+      padding-top: 0 !important;
+    }
+  }
+}

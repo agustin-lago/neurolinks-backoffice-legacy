@@ -1,0 +1,29 @@
+@layer utilities {
+  /* User management */
+  .user-register-box {
+    @apply p-4 rounded-xl mb-5;
+    background: rgba(0, 153, 255, 0.05);
+    border: 1px solid rgba(0, 153, 255, 0.1);
+  }
+
+  .user-register-title {
+    @apply text-xs font-heading font-bold uppercase tracking-wider text-accent-bright mb-3;
+  }
+
+  .team-list-title {
+    @apply text-xs text-secondary-content uppercase tracking-wider mb-2;
+  }
+
+  #team-list-container {
+    @apply max-h-48 overflow-y-auto;
+  }
+
+  .mb-10 {
+    margin-bottom: 10px;
+  }
+
+  .mb-15 {
+    margin-bottom: 15px;
+  }
+
+}

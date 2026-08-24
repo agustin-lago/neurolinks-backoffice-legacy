@@ -1,0 +1,27 @@
+/* Skeleton Loading */
+.skeleton {
+  @apply animate-pulse;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+}
+[data-theme="light"] .skeleton {
+  background: rgba(0, 0, 0, 0.08);
+}
+.skeleton-text {
+  @apply skeleton;
+  height: 14px;
+  margin-bottom: 6px;
+  border-radius: 4px;
+}
+.skeleton-title {
+  @apply skeleton;
+  height: 20px;
+  width: 60%;
+  margin-bottom: 12px;
+}
+.skeleton-avatar {
+  @apply skeleton;
+  height: 40px;
+  width: 40px;
+  border-radius: 50%;
+}

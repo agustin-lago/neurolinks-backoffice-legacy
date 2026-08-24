@@ -1,0 +1,116 @@
+@layer utilities {
+  /* Tasks dashboard panel (side panel) */
+  .tasks-dashboard-panel {
+    @apply fixed top-24 h-[calc(100dvh-6rem)] flex flex-col overflow-hidden;
+    right: -420px;
+    width: 400px;
+    background: rgba(15, 42, 68, 0.96);
+    backdrop-filter: blur(20px);
+    border-left: 1px solid rgba(0, 153, 255, 0.1);
+    border-radius: 24px 0 0 24px;
+    box-shadow: -15px 0 40px rgba(0, 0, 0, 0.3);
+    z-index: 1000;
+    transition: right 0.5s cubic-bezier(0.19, 1, 0.22, 1);
+  }
+
+  [data-theme="light"] .tasks-dashboard-panel {
+    background: rgba(255, 255, 255, 0.97);
+  }
+
+  .tasks-dashboard-panel.active {
+    right: 0;
+  }
+
+  @media (max-width: 1024px) {
+    .tasks-dashboard-panel {
+      width: 100%;
+      right: -100%;
+      border-radius: 0;
+      top: 60px;
+      height: calc(100dvh - 60px);
+    }
+  }
+
+  .tasks-header {
+    @apply flex justify-between items-center px-7 py-5;
+    border-bottom: 1px solid rgba(0, 153, 255, 0.1);
+    background: rgba(255, 255, 255, 0.03);
+  }
+
+  .tasks-header h3 {
+    @apply m-0 text-base font-heading font-bold text-primary-content flex items-center gap-3;
+  }
+
+  .tasks-content {
+    @apply flex-1 overflow-y-auto p-6 flex flex-col gap-4;
+  }
+
+  .task-card {
+    @apply flex items-center gap-4 p-4 rounded-2xl cursor-pointer transition-all duration-300 relative;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-left: 4px solid #0099FF;
+  }
+
+  [data-theme="light"] .task-card {
+    background: #fff;
+    border-color: rgba(0, 0, 0, 0.07);
+  }
+
+  .task-card:hover {
+    @apply -translate-x-1;
+    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.1);
+  }
+
+  .task-card.today {
+    border-left-color: #f59e0b;
+  }
+
+  .task-date {
+    @apply flex flex-col items-center justify-center p-2 rounded-xl min-w-[48px] text-center;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    font-size: 0.65rem;
+    font-weight: 800;
+    color: rgba(255, 255, 255, 0.5);
+  }
+
+  .task-date.today {
+    background: #f59e0b;
+    color: white;
+    border-color: #f59e0b;
+  }
+
+  .task-info {
+    @apply flex-1;
+  }
+
+  .task-title {
+    @apply font-heading font-bold text-sm text-primary-content mb-1 truncate max-w-[200px];
+  }
+
+  .task-meta {
+    @apply flex gap-2 items-center;
+  }
+
+  .task-priority {
+    @apply text-[10px] px-2 py-0.5 rounded-md text-white font-heading font-bold uppercase;
+  }
+
+  .task-status {
+    @apply text-xs text-secondary-content;
+  }
+
+  .task-arrow {
+    @apply text-secondary-content opacity-30 transition-all duration-300;
+  }
+
+  .task-card:hover .task-arrow {
+    @apply opacity-100 text-accent-bright translate-x-0.5;
+  }
+
+  .kanban-header-icon {
+    @apply text-accent-bright mr-3;
+  }
+
+}

@@ -1,0 +1,36 @@
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700;800&family=Poppins:wght@400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+  Tailwind source manifest. Local imports are expanded by
+  scripts/compose-tailwind-input.mjs before Tailwind builds tailwind.css.
+*/
+@import './modules/shared/base.css';
+@import './modules/shared/components.css';
+@import './modules/shared/navigation.css';
+@import './modules/shared/responsive.css';
+@import './modules/shared/layout.css';
+@import './modules/shared/theme.css';
+@import './modules/views/dashboard.css';
+@import './modules/views/system-config.css';
+@import './modules/views/crm.css';
+@import './modules/views/usuarios.css';
+@import './modules/views/tickets.css';
+@import './modules/views/docs.css';
+@import './modules/views/backoffice.css';
+@import './modules/views/contactos.css';
+@import './modules/views/webchat.css';
+@import './modules/views/meta.css';
+@import './modules/views/import-tools.css';
+@import './modules/views/login.css';
+@import './modules/shared/notifications.css';
+@import './modules/shared/tags.css';
+@import './modules/shared/toast.css';
+@import './modules/shared/animations.css';
+@import './modules/shared/buttons.css';
+@import './modules/shared/modals.css';
+@import './modules/shared/skeleton.css';
+@import './modules/shared/theme-overrides.css';

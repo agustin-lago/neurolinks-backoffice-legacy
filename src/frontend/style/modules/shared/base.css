@@ -1,0 +1,98 @@
+/* â”€â”€â”€ Base â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+@layer base {
+  html {
+    scroll-behavior: smooth;
+    font-family: 'Poppins', sans-serif;
+    --card-bg: rgba(22, 54, 84, 0.72);
+    --card-border-color: rgba(0, 153, 255, 0.12);
+    --text-main: rgba(255, 255, 255, 0.88);
+    --text-muted: rgba(255, 255, 255, 0.45);
+    --border: rgba(255, 255, 255, 0.08);
+    --bg-header: rgba(15, 42, 68, 0.72);
+  }
+
+  [data-theme="light"] {
+    --card-bg: rgba(255, 255, 255, 0.92);
+    --card-border-color: rgba(37, 99, 235, 0.15);
+    --text-main: #111827;
+    --text-muted: #6b7280;
+    --border: rgba(0, 0, 0, 0.08);
+    --bg-header: rgba(255, 255, 255, 0.85);
+  }
+
+  body {
+    @apply antialiased;
+    color: rgba(255, 255, 255, 0.85);
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+  }
+
+  /* Global fix for view wrappers so they don't get clipped by the topbar */
+  #view-content-root > div,
+  #view-content-root > main,
+  #view-content-root > section {
+    height: 100% !important;
+    min-height: 100% !important;
+    max-height: 100% !important;
+    box-sizing: border-box;
+  }
+
+  [data-theme="light"] body {
+    color: #111827;
+  }
+
+  /* Scrollbar â€” dark mode (default) */
+  ::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: #071827;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: rgba(0, 153, 255, 0.38);
+    border-radius: 4px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 153, 255, 0.38);
+  }
+
+  /* Scrollbar â€” light mode */
+  [data-theme="light"] ::-webkit-scrollbar-track {
+    background: #f0f4f8;
+  }
+
+  [data-theme="light"] ::-webkit-scrollbar-thumb {
+    background: rgba(0, 153, 255, 0.38);
+    border-radius: 4px;
+  }
+
+  [data-theme="light"] ::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 153, 255, 0.38);
+  }
+
+  /* Password reveal eye icon — dark mode */
+  [data-theme="dark"] input[type="password"]::-ms-reveal,
+  [data-theme="dark"] input[type="password"]::-webkit-credentials-auto-fill-button {
+    filter: invert(1);
+  }
+
+  /* Previene auto-zoom en iOS en todos los inputs de la app */
+  @media (max-width: 1024px) {
+    input[type="text"],
+    input[type="email"],
+    input[type="number"],
+    input[type="password"],
+    input[type="search"],
+    input[type="tel"],
+    input[type="url"],
+    textarea,
+    select {
+      font-size: 16px !important;
+    }
+  }
+}

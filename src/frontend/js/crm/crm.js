@@ -1,0 +1,1475 @@
+/* global Sortable, FB, metaAppId, showToast, _csdRebuild, _csdSync, Swal */
+(function() {
+const backofficeToken = localStorage.getItem('backoffice_token');
+const activeToken = backofficeToken;
+
+if (!activeToken) window.location.href = '/login';
+
+const userRole = localStorage.getItem('user_role') || 'subuser';
+const userId = localStorage.getItem('user_id');
+const isAdmin = (userRole === 'admin' || localStorage.getItem('is_superadmin') === 'true');
+const userName = localStorage.getItem('user_name') || 'Usuario';
+
+let teamUsers = [];
+let allLeads = [];
+let allTickets = [];
+let crmData = {};
+let botTags = [];
+let isSyncingCRM = false;
+let queuedSyncCRM = false;
+let socketSyncTimer = null;
+let hasLoadedCRMData = false;
+let crmViewRunId = 0;
+let selectedBulkDeleteIds = new Set();
+
+let kanbanBoard = null;
+let columns = [
+    { id: 'UNASSIGNED', title: 'Leads Nuevos', fixed: true },
+    { id: 'contactado', title: 'Contactado' },
+    { id: 'negociacion', title: 'En Negociación' },
+    { id: 'propuesta', title: 'Propuesta Enviada' },
+    { id: 'cierre', title: 'Cierre' }
+];
+
+// crmConfig y applyCRMConfig ahora se cargan desde crm-common.js
+
+function isCurrentCRMView() {
+    return window.location.pathname === '/crm' && Boolean(document.querySelector('[data-crm-view="crm"] #kanban-board-inner'));
+}
+
+function isCurrentCRMRun(runId) {
+    return runId === crmViewRunId && isCurrentCRMView();
+}
+// --- Inicialización ---
+async function _initCRMPage() {
+    const runId = ++crmViewRunId;
+    console.log('🚀 Iniciando CRM como:', userName, `(${userRole})`);
+    
+    // Mostrar botones de admin si corresponde
+    if (isAdmin) {
+        const btnNewUser = document.getElementById('btn-new-user');
+        if (btnNewUser) btnNewUser.style.display = 'block';
+    }
+    const assigneeSection = document.getElementById('assignee-section');
+    if (assigneeSection) assigneeSection.style.display = 'block';
+    
+    // Cargar equipo para los selects (para todos los usuarios)
+    await loadTeam();
+    if (!isCurrentCRMRun(runId)) return;
+
+    // Cargar etiquetas (para todos)
+    await fetchTags();
+    if (!isCurrentCRMRun(runId)) return;
+    updateFilterTagOptions();
+
+    // Cargamos primero el estado (columnas) y la configuración de campos
+    await Promise.all([
+        loadCRMState(),
+        window.fetchCRMConfig()
+    ]);
+    if (!isCurrentCRMRun(runId)) return;
+    // Luego sincronizamos los datos (tickets, leads y metadatos de posicionamiento)
+    await syncCRM();
+    if (!isCurrentCRMRun(runId)) return;
+
+    // Verificamos si hay un ticket pendiente de abrir (viniendo del Backoffice)
+    const pendingId = localStorage.getItem('pendingTicket');
+    if (pendingId) {
+        localStorage.removeItem('pendingTicket');
+        localStorage.removeItem('activeChat'); // Limpiamos también el de chat
+        console.log('[CRM] Apertura automática de ticket:', pendingId);
+        // Pequeño delay para asegurar que distributeCards terminó de renderizar
+        setTimeout(() => openCardModal(pendingId), 300);
+    }
+    
+    // Auto-check de alertas cada minuto (evitar acumulacion en re-visitas SPA)
+    if (window._crmAlertInterval) clearInterval(window._crmAlertInterval);
+    window._crmAlertInterval = setInterval(checkAlertsVisual, 60000);
+
+    _setupCRMFormHandlers();
+
+    // Re-afirmar globals que crm-tareas.js puede haber sobreescrito
+    window.syncCRM = syncCRM;
+    window.addNewColumn = addNewColumn;
+    window.openCardModal = openCardModal;
+    window.closeCardModal = closeCardModal;
+    window.editColumn = editColumn;
+    window.closeColumnModal = closeColumnModal;
+    window.deleteCurrentColumn = deleteCurrentColumn;
+    window.saveColumnName = saveColumnName;
+    window.applyCRMFilters = applyCRMFilters;
+    window.clearCRMFilters = clearCRMFilters;
+    window.toggleCRMFiltersDropdown = toggleCRMFiltersDropdown;
+    window.closeCRMFiltersDropdown = closeCRMFiltersDropdown;
+    window.openCRMFiltersModal = toggleCRMFiltersDropdown;
+    window.closeCRMFiltersModal = closeCRMFiltersDropdown;
+    window.confirmBulkDeleteLeads = openBulkDeleteLeadsModal;
+    window.openBulkDeleteLeadsModal = openBulkDeleteLeadsModal;
+    window.closeBulkDeleteLeadsModal = closeBulkDeleteLeadsModal;
+    window.toggleBulkDeleteLead = toggleBulkDeleteLead;
+    window.toggleBulkDeleteSelectAll = toggleBulkDeleteSelectAll;
+    window.applyBulkDeleteFilters = applyBulkDeleteFilters;
+    window.clearBulkDeleteFilters = clearBulkDeleteFilters;
+    window.confirmBulkDeleteSelectedLeads = confirmBulkDeleteSelectedLeads;
+
+    // Inicializar o re-inicializar sockets
+    if (typeof io !== 'undefined') {
+        if (!window.crmSocket) {
+            window.crmSocket = io();
+        }
+        window.crmSocket.off('contact_updated', onContactUpdated);
+        window.crmSocket.off('ticket_updated', onTicketUpdated);
+        window.crmSocket.off('new_message', onNewMessage);
+
+        window.crmSocket.on('contact_updated', onContactUpdated);
+        window.crmSocket.on('ticket_updated', onTicketUpdated);
+        window.crmSocket.on('new_message', onNewMessage);
+        console.log('📡 [Socket CRM] Conectado y escuchando eventos');
+    }
+
+    console.log('✅ CRM Listo');
+}
+
+// Para SPA: re-inicializar sin recargar el script
+window.initCRMView = _initCRMPage;
+
+// Exportar globalmente para botones HTML
+window.syncCRM = syncCRM;
+window.addNewColumn = addNewColumn;
+window.openCardModal = openCardModal;
+window.closeCardModal = closeCardModal;
+window.editColumn = editColumn;
+window.closeColumnModal = closeColumnModal;
+window.deleteCurrentColumn = deleteCurrentColumn;
+window.saveColumnName = saveColumnName;
+window.applyCRMFilters = applyCRMFilters;
+window.clearCRMFilters = clearCRMFilters;
+window.toggleCRMFiltersDropdown = toggleCRMFiltersDropdown;
+window.closeCRMFiltersDropdown = closeCRMFiltersDropdown;
+window.openCRMFiltersModal = toggleCRMFiltersDropdown;
+window.closeCRMFiltersModal = closeCRMFiltersDropdown;
+window.confirmBulkDeleteLeads = openBulkDeleteLeadsModal;
+window.openBulkDeleteLeadsModal = openBulkDeleteLeadsModal;
+window.closeBulkDeleteLeadsModal = closeBulkDeleteLeadsModal;
+window.toggleBulkDeleteLead = toggleBulkDeleteLead;
+window.toggleBulkDeleteSelectAll = toggleBulkDeleteSelectAll;
+window.applyBulkDeleteFilters = applyBulkDeleteFilters;
+window.clearBulkDeleteFilters = clearBulkDeleteFilters;
+window.confirmBulkDeleteSelectedLeads = confirmBulkDeleteSelectedLeads;
+
+async function loadCRMState() {
+    // Intentar cargar el orden de las columnas desde el servidor
+    try {
+        const res = await fetch(`/api/backoffice/get-setting?key=CRM_COLUMNS&token=${activeToken}`);
+        const data = await res.json();
+        if (data.success && data.value) {
+            columns = JSON.parse(data.value);
+            // Asegurarse de que UNASSIGNED siempre esté presente primero y con el título "Leads Nuevos"
+            const unassigned = columns.find(c => c.id === 'UNASSIGNED');
+            if (unassigned) {
+                unassigned.title = 'Leads Nuevos';
+            } else {
+                columns.unshift({ id: 'UNASSIGNED', title: 'Leads Nuevos', fixed: true });
+            }
+        }
+    } catch (e) {
+        console.log('Usando columnas por defecto');
+    }
+    try { renderBoard(); } catch (e) { console.error('[CRM] renderBoard error:', e); }
+}
+
+async function saveCRMState() {
+    try {
+        await fetch(`/api/backoffice/save-setting?token=${activeToken}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                key: 'CRM_COLUMNS',
+                value: JSON.stringify(columns)
+            })
+        });
+    } catch (e) { console.error('Error guardando estado:', e); }
+}
+
+async function syncCRM(options = {}) {
+    const { silent = false } = options;
+
+    if (isSyncingCRM) {
+        queuedSyncCRM = true;
+        return;
+    }
+
+    isSyncingCRM = true;
+    try {
+        const [resLeads, resTickets] = await Promise.all([
+            fetch(`/api/backoffice/leads?token=${activeToken}&limit=300`),
+            fetch(`/api/backoffice/tickets?token=${activeToken}&estado=all_active`) // Traer todos los tickets activos para el tablero
+        ]);
+
+        const leadsData = await resLeads.json();
+        allLeads = Array.isArray(leadsData) ? leadsData : [];
+        
+        const ticketsRaw = await resTickets.json();
+        if (!isCurrentCRMView()) return;
+        const ticketsData = Array.isArray(ticketsRaw) ? ticketsRaw : [];
+        
+        // El CRM solo muestra los tickets que son Nuevo Lead y que NO esten cerrados
+        allTickets = ticketsData.filter(t => t.tipo === 'Nuevo Lead' && t.estado !== 'Cerrado');
+        console.log(`[CRM] Tickets activos: ${allTickets.length}`);
+
+        const resSettings = await fetch(`/api/backoffice/get-setting?key=CRM_METADATA&token=${activeToken}`);
+        const setJson = await resSettings.json();
+        if (!isCurrentCRMView()) return;
+        if (setJson && setJson.success && setJson.value) {
+            crmData = JSON.parse(setJson.value);
+        } else {
+            crmData = {};
+        }
+
+        hasLoadedCRMData = true;
+        renderBoard();
+        if (!isCurrentCRMView()) return;
+        await loadTasksDashboard();
+    } catch (e) {
+        console.error(e);
+        hasLoadedCRMData = true;
+        renderBoard();
+        if (!isCurrentCRMView()) return;
+        if (!silent) showToast('Error al sincronizar datos', 'error');
+    } finally {
+        isSyncingCRM = false;
+        if (isCurrentCRMView() && queuedSyncCRM) {
+            queuedSyncCRM = false;
+            syncCRM({ silent: true });
+        } else {
+            queuedSyncCRM = false;
+        }
+    }
+}
+window.syncCRM = syncCRM; // Exportar globalmente
+
+function renderBoard() {
+    if (!isCurrentCRMView()) return;
+    const board = document.getElementById('kanban-board-inner');
+    if (!board) return;
+
+    if (!hasLoadedCRMData) {
+        renderCRMSkeletonBoard(board, columns);
+        return;
+    }
+
+    const hasSkeletonBoard = !!board.querySelector('.crm-skeleton-column');
+    if (!hasSkeletonBoard && board.children.length === columns.length) {
+        columns.forEach(col => {
+            const titleEl = board.querySelector(`.kanban-column[data-id="${col.id}"] .column-title`);
+            if (titleEl && titleEl.innerText !== col.title) {
+                titleEl.innerText = col.title;
+            }
+        });
+        distributeCards();
+        return;
+    }
+
+    board.innerHTML = '';
+
+    columns.forEach((col, index) => {
+        const columnEl = document.createElement('div');
+        columnEl.className = 'kanban-column';
+        columnEl.dataset.id = col.id;
+        
+        columnEl.innerHTML = `
+            <div class="column-header">
+                <div class="column-title-group" style="min-width:0; flex:1; display:flex; align-items:center; gap:8px; overflow:hidden;">
+                    ${col.fixed ? '<i class="fas fa-star" style="color:#f59e0b; flex-shrink:0;"></i>' : ''}
+                    <span class="column-title" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; min-width: 0;">${col.title}</span>
+                </div>
+                <div style="display:flex; align-items:center; gap:8px; flex-shrink:0;">
+                    ${!col.fixed ? `<button class="btn-card-action" style="padding:4px 8px; font-size:0.7rem;" onclick="event.stopPropagation(); editColumn('${col.id}')" title="Editar Estado"><i class="fas fa-pen"></i></button>` : ''}
+                    <button class="btn-card-action" style="padding:4px 8px; font-size:0.7rem;" onclick="event.stopPropagation(); window.resetColumnWidth('${col.id}', event)" title="Restaurar tamaño por defecto">
+                        <i class="fas fa-rotate-left"></i>
+                    </button>
+                    <span class="column-badge" id="badge-${col.id}">0</span>
+                </div>
+            </div>
+            <div class="kanban-cards" id="cards-${col.id}"></div>
+        `;
+        const wrapperEl = document.createElement('div');
+        wrapperEl.className = 'kanban-column-wrapper';
+        wrapperEl.dataset.id = col.id;
+        wrapperEl.appendChild(columnEl);
+
+        board.appendChild(wrapperEl);
+        if (typeof window.observeKanbanColumn === 'function') window.observeKanbanColumn(wrapperEl, col.id);
+    });
+
+    distributeCards();
+    try { initDragAndDrop(); } catch (e) { console.error('[CRM] initDragAndDrop error:', e); }
+    _initKanbanScrollBehavior();
+}
+
+function renderCRMSkeletonBoard(board, skeletonColumns) {
+    const sourceColumns = Array.isArray(skeletonColumns) && skeletonColumns.length
+        ? skeletonColumns
+        : columns;
+    board.innerHTML = sourceColumns.map((col) => {
+        const savedWidth = localStorage.getItem('col_width_' + col.id);
+        const widthStyle = savedWidth ? ` style="width:${savedWidth};"` : '';
+        return `
+        <div class="kanban-column-wrapper crm-skeleton-column-wrapper" data-id="${col.id}"${widthStyle}>
+            <div class="kanban-column crm-skeleton-column" data-id="${col.id}">
+                <div class="column-header">
+                    <div class="column-title-group">
+                        ${col.fixed ? '<i class="fas fa-star" style="color:#f59e0b; flex-shrink:0;"></i>' : ''}
+                        <span class="column-title">${col.title}</span>
+                    </div>
+                    <span class="column-badge skeleton-badge"></span>
+                </div>
+                <div class="kanban-cards crm-skeleton-cards">
+                    ${Array.from({ length: 2 }).map(() => `
+                        <div class="kanban-card crm-skeleton-card">
+                            <div class="crm-skeleton-line crm-skeleton-ref"></div>
+                            <div class="crm-skeleton-pill"></div>
+                            <div class="crm-skeleton-line crm-skeleton-title"></div>
+                            <div class="crm-skeleton-line crm-skeleton-phone"></div>
+                            <div class="crm-skeleton-footer">
+                                <div class="crm-skeleton-button"></div>
+                                <div class="crm-skeleton-icon"></div>
+                                <div class="crm-skeleton-icon"></div>
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>
+        </div>
+    `;
+    }).join('');
+}
+
+function getTicketsByFilterControls(tagId, dateFromId, dateToId) {
+    const activeTag = document.getElementById(tagId)?.value || '';
+    const dateFromVal = document.getElementById(dateFromId)?.value || '';
+    const dateToVal = document.getElementById(dateToId)?.value || '';
+
+    const dateFrom = dateFromVal ? new Date(dateFromVal + 'T00:00:00') : null;
+    const dateTo = dateToVal ? new Date(dateToVal + 'T23:59:59') : null;
+
+    return allTickets.filter(ticket => {
+        const lead = allLeads.find(l => l.id === ticket.chat_id);
+
+        // 1. Filtro por Etiqueta
+        if (activeTag) {
+            const leadTags = (lead?.tags || []).map(t => typeof t === 'string' ? t : t.id);
+            if (!leadTags.includes(activeTag)) return false;
+        }
+
+        // 2. Filtro por Fecha (Fecha de creación del ticket o última interacción del lead)
+        if (dateFrom || dateTo) {
+            const dateStr = ticket.created_at || lead?.last_message_at || lead?.created_at;
+            if (!dateStr) return false;
+            const ticketDate = new Date(dateStr);
+            if (dateFrom && ticketDate < dateFrom) return false;
+            if (dateTo && ticketDate > dateTo) return false;
+        }
+
+        return true;
+    });
+}
+
+function getFilteredTickets() {
+    return getTicketsByFilterControls('crm-filter-tag', 'crm-filter-date-from', 'crm-filter-date-to');
+}
+
+function getBulkDeleteFilteredTickets() {
+    return getTicketsByFilterControls('crm-bulk-filter-tag', 'crm-bulk-filter-date-from', 'crm-bulk-filter-date-to');
+}
+
+function updateFilteredBadge(filteredCount, totalCount) {
+    const badge = document.getElementById('crm-filtered-count-badge');
+    if (!badge) return;
+    const activeTag = document.getElementById('crm-filter-tag')?.value;
+    const dateFrom = document.getElementById('crm-filter-date-from')?.value;
+    const dateTo = document.getElementById('crm-filter-date-to')?.value;
+
+    const hasFilter = activeTag || dateFrom || dateTo;
+    if (hasFilter) {
+        badge.innerHTML = `<i class="fas fa-filter"></i> Mostrando <strong>${filteredCount}</strong> de ${totalCount} leads`;
+        badge.style.background = 'rgba(239, 68, 68, 0.15)';
+        badge.style.color = '#f87171';
+        badge.style.borderColor = 'rgba(239, 68, 68, 0.3)';
+    } else {
+        badge.innerHTML = `<i class="fas fa-users"></i> Mostrando ${totalCount} leads`;
+        badge.style.background = 'rgba(99, 102, 241, 0.15)';
+        badge.style.color = '#818cf8';
+        badge.style.borderColor = 'rgba(99, 102, 241, 0.3)';
+    }
+}
+
+function distributeCards() {
+    const containers = document.querySelectorAll('.kanban-cards');
+    containers.forEach(c => c.innerHTML = '');
+
+    const filteredTickets = getFilteredTickets();
+
+    filteredTickets.forEach(ticket => {
+        const lead = allLeads.find(l => l.id === ticket.chat_id);
+        const metadata = crmData[ticket.id] || {};
+        // Priorizar el posicionamiento del crm_status de la DB como fuente de verdad, caer al metadata/UNASSIGNED
+        const columnId = lead?.crm_status || metadata.columnId || 'UNASSIGNED';
+        
+        const container = document.getElementById(`cards-${columnId}`);
+        if (container) {
+            container.appendChild(createCardElement(ticket, lead, metadata));
+        }
+    });
+
+    updateCounters();
+    checkAlertsVisual();
+    updateFilteredBadge(filteredTickets.length, allTickets.length);
+}
+
+function createCardElement(ticket, lead, metadata) {
+    const card = document.createElement('div');
+    card.className = 'kanban-card';
+    card.dataset.id = ticket.id;
+    card.id = `card-${ticket.id}`;
+    
+    card.onclick = (e) => {
+        if (e.target.closest('button')) return;
+        localStorage.setItem('activeChat', ticket.chat_id);
+        if (typeof window.navigate === 'function') window.navigate('/conversaciones');
+        else window.location.href = '/conversaciones';
+    };
+    
+    const tagCount = Array.isArray(lead?.tags) ? lead.tags.filter(Boolean).length : 0;
+
+    const phone = ticket.chat_id ? ticket.chat_id.split('@')[0] : 'Desconocido';
+    const email = lead?.email || '';
+    const cuit = lead?.cuit_dni || '';
+    const product = lead?.offered_product || ticket.tipo || '';
+    
+    const dbAlertDate = lead?.crm_due_date ? lead.crm_due_date.split('T')[0] : null;
+    const finalAlertDate = dbAlertDate || metadata.alertDate || null;
+    const alertDateStr = finalAlertDate ? formatDate(finalAlertDate) : 'Sin alerta';
+
+    // Helper para verificar visibilidad según configuración dinámica
+    const isVisible = (fieldId) => {
+        const f = (window.crmConfig || []).find(x => x.id === fieldId);
+        return f ? f.visible !== false : true;
+    };
+
+    const priorityIndicatorHtml = isVisible('crm-priority') 
+        ? `<div class="priority-indicator" style="background:${getPriorityColor(ticket.prioridad || metadata.priority || 'Media')}"></div>`
+        : '';
+
+    const productBadgeHtml = isVisible('crm-product')
+        ? `<div class="card-type-badge"><i class="fas fa-shopping-bag"></i> ${product}</div>`
+        : '';
+
+    let titleHtml = '';
+    if (cuit && isVisible('crm-cuit')) {
+        titleHtml = `<div class="card-title"><span style="font-size:0.7rem; opacity:0.6;">CUIL: ${cuit}</span></div>`;
+    }
+
+    const leadNameHtml = isVisible('crm-name')
+        ? `<div class="card-lead-main"><i class="fas fa-user-circle"></i> ${lead?.name || 'Lead sin nombre'}</div>`
+        : '';
+
+    let detailsHtml = '';
+    const phoneHtml = isVisible('crm-phone') ? `<div class="detail-item"><i class="fas fa-phone"></i> ${phone}</div>` : '';
+    const emailHtml = (email && isVisible('crm-email')) ? `<div class="detail-item"><i class="fas fa-envelope"></i> ${email}</div>` : '';
+    if (phoneHtml || emailHtml) {
+        detailsHtml = `<div class="card-lead-details">${phoneHtml}${emailHtml}</div>`;
+    }
+
+    const alertHtml = isVisible('crm-due-date')
+        ? `<div class="card-alert ${getAlertClass(finalAlertDate)}" id="alert-card-${ticket.id}" onclick="event.stopPropagation(); openCardModal('${ticket.id}'); setTimeout(() => { const inp = document.getElementById('edit-alert-date'); if(inp) inp.focus(); }, 100);"><i class="fas fa-bell"></i> ${alertDateStr}</div>`
+        : '';
+
+    card.innerHTML = `
+        ${priorityIndicatorHtml}
+        <div style="display:flex; justify-content:flex-end; align-items:flex-start;">
+            <div style="font-size:0.6rem; font-family:monospace; opacity:0.5; background:var(--bg-header); padding:2px 6px; border-radius:4px; margin-top:8px; margin-right:8px;">
+                REF: ${ticket.id.slice(-8).toUpperCase()}
+            </div>
+        </div>
+        ${productBadgeHtml}
+        ${titleHtml}
+        ${leadNameHtml}
+        ${detailsHtml}
+        <div class="card-footer">
+            ${alertHtml}
+            <div style="display:flex; gap:8px; align-items:center;">
+                <span class="card-tag-count" title="${tagCount} etiquetas" onclick="event.stopPropagation()"><i class="fas fa-tags"></i> ${tagCount}</span>
+                <button class="btn-card-action" title="Cerrar Lead" onclick="event.stopPropagation(); confirmCloseTicket('${ticket.id}')">
+                    <i class="fas fa-check"></i>
+                </button>
+                <button class="btn-card-action" title="Ver Detalles/Editar" onclick="event.stopPropagation(); openCardModal('${ticket.id}')">
+                    <i class="fas fa-pen"></i>
+                </button>
+            </div>
+        </div>
+    `;
+
+    return card;
+}
+
+function initDragAndDrop() {
+    // 1. Arrastre de tarjetas entre columnas
+    document.querySelectorAll('.kanban-cards').forEach(container => {
+        if (Sortable.get(container)) return;
+        new Sortable(container, {
+            group: 'kanban',
+            animation: 150,
+            ghostClass: 'sortable-ghost',
+            onEnd: async (evt) => {
+                const ticketId = evt.item.dataset.id;
+                const newColumnId = evt.to.id.replace('cards-', '');
+                if (!crmData[ticketId]) crmData[ticketId] = {};
+                crmData[ticketId].columnId = newColumnId;
+
+                const ticket = allTickets.find(t => t.id === ticketId);
+                if (ticket && ticket.chat_id) {
+                    await updateLeadStatus(ticket.chat_id, newColumnId);
+                }
+
+                saveCRMMetadata();
+                updateCounters();
+            }
+        });
+    });
+
+    // 2. Arrastre de columnas (Reordenar etapas)
+    const boardInner = document.getElementById('kanban-board-inner');
+    if (boardInner && !Sortable.get(boardInner)) {
+        new Sortable(boardInner, {
+            animation: 200,
+            draggable: '.kanban-column-wrapper',
+            handle: '.column-header',
+            ghostClass: 'kanban-column-ghost',
+            dragClass: 'kanban-drag-clone',
+            forceFallback: true,
+            fallbackClass: 'kanban-drag-clone',
+            onEnd: () => {
+                const newOrder = [];
+                document.querySelectorAll('.kanban-column-wrapper .kanban-column').forEach(col => {
+                    const colId = col.dataset.id;
+                    const existingCol = columns.find(c => c.id === colId);
+                    if (existingCol) newOrder.push(existingCol);
+                });
+                columns = newOrder;
+                saveCRMState();
+            }
+        });
+    }
+}
+
+async function saveCRMMetadata() {
+    try {
+        await fetch(`/api/backoffice/save-setting?token=${activeToken}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                key: 'CRM_METADATA',
+                value: JSON.stringify(crmData)
+            })
+        });
+    } catch (e) { console.error('Error guardando metadatos:', e); }
+}
+
+function updateCounters() {
+    columns.forEach(col => {
+        const count = document.querySelectorAll(`#cards-${col.id} .kanban-card`).length;
+        const badge = document.getElementById(`badge-${col.id}`);
+        if (badge) badge.innerText = count;
+    });
+}
+
+// --- Modales ---
+let currentEditId = null;
+function openCardModal(ticketId) {
+    currentEditId = ticketId;
+    const ticket = allTickets.find(t => t.id === ticketId);
+    const lead = allLeads.find(l => l.id === ticket.chat_id);
+    const metadata = crmData[ticketId] || {};
+    const notes = lead?.notes || metadata.customNotes || '';
+    
+    document.getElementById('edit-lead-id').value = ticketId;
+    const refElement = document.getElementById('modal-ticket-ref');
+    if (refElement) refElement.innerText = `REF: ${ticketId.slice(-8).toUpperCase()}`;
+    
+    const dbAlertDate = lead?.crm_due_date ? lead.crm_due_date.split('T')[0] : null;
+    document.getElementById('edit-ticket-title').value = ticket.titulo || '';
+    document.getElementById('edit-alert-date').value = dbAlertDate || metadata.alertDate || '';
+    document.getElementById('edit-priority').value = ticket.prioridad || metadata.priority || 'Media';
+    document.getElementById('edit-custom-notes').value = notes;
+    
+    // Campos del Lead Expandidos
+    document.getElementById('edit-lead-name').value = lead?.name || '';
+    document.getElementById('edit-lead-email').value = lead?.email || '';
+    document.getElementById('edit-lead-source').value = lead?.source || '';
+    document.getElementById('edit-lead-phone').value = ticket.chat_id ? ticket.chat_id.split('@')[0] : 'Desconocido';
+    document.getElementById('edit-lead-cuit').value = lead?.cuit_dni || '';
+    document.getElementById('edit-lead-address').value = lead?.address || '';
+    document.getElementById('edit-lead-tax-status').value = lead?.tax_status || 'Cons. Final';
+    document.getElementById('edit-lead-offered-product').value = lead?.offered_product || ticket.tipo || '';
+
+    // Carga de asignación
+    const selectAssign = document.getElementById('edit-lead-assignee');
+    if (selectAssign) {
+        selectAssign.value = lead?.assigned_to || '';
+        _csdSync('edit-lead-assignee');
+    }
+
+    // Cargar opciones de estado basadas en las columnas
+    const selectStatus = document.getElementById('edit-lead-status');
+    if (selectStatus) {
+        selectStatus.innerHTML = columns.map(c => `<option value="${c.id}">${c.title}</option>`).join('');
+        selectStatus.value = lead?.crm_status || metadata.columnId || 'UNASSIGNED';
+        _csdRebuild('edit-lead-status');
+        _csdSync('edit-lead-status');
+    }
+
+    window.applyCRMConfig(); // Aplicar orden y visibilidad
+    renderLeadTags(); // Renderizar etiquetas
+
+    document.getElementById('additional-notes-list').innerHTML = '';
+    document.getElementById('card-modal').classList.add('active');
+}
+
+// --- Tag Management CRM & Filtros ---
+async function fetchTags() {
+    try {
+        const res = await fetch(`/api/backoffice/tags?token=${activeToken}`);
+        botTags = await res.json();
+        updateFilterTagOptions();
+    } catch (e) {
+        console.error('[fetchTags] Error:', e);
+    }
+}
+
+function updateFilterTagOptions() {
+    syncTagOptions('crm-filter-tag');
+    syncTagOptions('crm-bulk-filter-tag');
+}
+
+function syncTagOptions(selectId) {
+    const select = document.getElementById(selectId);
+    if (!select) return;
+    const currentVal = select.value;
+    select.innerHTML = '<option value="">Todas las etiquetas</option>' +
+        (botTags || []).map(t => `<option value="${t.id}">${t.name}</option>`).join('');
+    select.value = Array.from(select.options).some(opt => opt.value === currentVal) ? currentVal : '';
+}
+
+function applyCRMFilters() {
+    distributeCards();
+    if (document.getElementById('crm-bulk-delete-modal')?.classList.contains('active')) {
+        applyBulkDeleteFilters();
+    }
+}
+
+function clearCRMFilters() {
+    const tagSel = document.getElementById('crm-filter-tag');
+    const dateFromInp = document.getElementById('crm-filter-date-from');
+    const dateToInp = document.getElementById('crm-filter-date-to');
+
+    if (tagSel) tagSel.value = '';
+    if (dateFromInp) dateFromInp.value = '';
+    if (dateToInp) dateToInp.value = '';
+
+    distributeCards();
+}
+
+function toggleCRMFiltersDropdown() {
+    const dropdown = document.getElementById('crm-filters-dropdown');
+    const button = document.querySelector('.crm-toolbar-filter-btn');
+    if (!dropdown) return;
+
+    const isOpen = dropdown.classList.toggle('active');
+    if (button) button.setAttribute('aria-expanded', String(isOpen));
+
+    if (isOpen) {
+        setTimeout(() => document.addEventListener('click', handleCRMFiltersOutsideClick));
+    } else {
+        document.removeEventListener('click', handleCRMFiltersOutsideClick);
+    }
+}
+
+function closeCRMFiltersDropdown() {
+    const dropdown = document.getElementById('crm-filters-dropdown');
+    const button = document.querySelector('.crm-toolbar-filter-btn');
+    if (dropdown) dropdown.classList.remove('active');
+    if (button) button.setAttribute('aria-expanded', 'false');
+    document.removeEventListener('click', handleCRMFiltersOutsideClick);
+}
+
+function handleCRMFiltersOutsideClick(event) {
+    if (event.target.closest('.crm-toolbar-filter-wrap')) return;
+    closeCRMFiltersDropdown();
+}
+
+function closeBulkDeleteLeadsModal() {
+    const modal = document.getElementById('crm-bulk-delete-modal');
+    if (modal) modal.classList.remove('active');
+}
+
+function escapeCRMText(value = '') {
+    return String(value).replace(/[&<>"']/g, (char) => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+    }[char]));
+}
+
+function getBulkDeleteTicketView(ticket) {
+    const lead = allLeads.find(l => l.id === ticket.chat_id);
+    const metadata = crmData[ticket.id] || {};
+    const phone = ticket.chat_id ? ticket.chat_id.split('@')[0] : 'Sin telefono';
+    const columnId = lead?.crm_status || metadata.columnId || 'UNASSIGNED';
+    const columnTitle = columns.find(c => c.id === columnId)?.title || columnId || 'Sin estado';
+    return {
+        name: lead?.name || ticket.titulo || phone || 'Lead sin nombre',
+        phone,
+        columnTitle
+    };
+}
+
+function syncBulkDeleteFiltersFromCRM() {
+    syncTagOptions('crm-bulk-filter-tag');
+    const bulkTag = document.getElementById('crm-bulk-filter-tag');
+    const bulkFrom = document.getElementById('crm-bulk-filter-date-from');
+    const bulkTo = document.getElementById('crm-bulk-filter-date-to');
+    if (bulkTag) bulkTag.value = document.getElementById('crm-filter-tag')?.value || '';
+    if (bulkFrom) bulkFrom.value = document.getElementById('crm-filter-date-from')?.value || '';
+    if (bulkTo) bulkTo.value = document.getElementById('crm-filter-date-to')?.value || '';
+}
+
+function applyBulkDeleteFilters() {
+    selectedBulkDeleteIds = new Set();
+    renderBulkDeleteList(getBulkDeleteFilteredTickets());
+}
+
+function clearBulkDeleteFilters() {
+    const tagSel = document.getElementById('crm-bulk-filter-tag');
+    const dateFromInp = document.getElementById('crm-bulk-filter-date-from');
+    const dateToInp = document.getElementById('crm-bulk-filter-date-to');
+
+    if (tagSel) tagSel.value = '';
+    if (dateFromInp) dateFromInp.value = '';
+    if (dateToInp) dateToInp.value = '';
+
+    applyBulkDeleteFilters();
+}
+
+function renderBulkDeleteList(tickets = getBulkDeleteFilteredTickets()) {
+    const list = document.getElementById('crm-bulk-delete-list');
+    if (!list) return;
+
+    if (tickets.length === 0) {
+        list.innerHTML = `
+            <div class="crm-bulk-delete-empty">
+                <i class="fas fa-filter"></i>
+                <span>No hay leads para los filtros seleccionados.</span>
+            </div>
+        `;
+        updateBulkDeleteSelectionState();
+        return;
+    }
+
+    list.innerHTML = tickets.map(ticket => {
+        const item = getBulkDeleteTicketView(ticket);
+        const safeId = escapeCRMText(ticket.id);
+        return `
+            <label class="crm-bulk-delete-item">
+                <input class="crm-bulk-delete-checkbox" type="checkbox" value="${safeId}" onchange="window.toggleBulkDeleteLead('${safeId}', this.checked)">
+                <span class="crm-bulk-delete-main">
+                    <strong>${escapeCRMText(item.name)}</strong>
+                    <small>${escapeCRMText(item.phone)} - ${escapeCRMText(item.columnTitle)}</small>
+                </span>
+                <span class="crm-bulk-delete-ref">REF: ${escapeCRMText(ticket.id.slice(-8).toUpperCase())}</span>
+            </label>
+        `;
+    }).join('');
+
+    updateBulkDeleteSelectionState();
+}
+
+function updateBulkDeleteSelectionState() {
+    const count = document.getElementById('crm-bulk-delete-count');
+    if (count) count.textContent = `${selectedBulkDeleteIds.size} seleccionados`;
+
+    const selectAll = document.getElementById('crm-bulk-delete-select-all');
+    const checkboxes = Array.from(document.querySelectorAll('.crm-bulk-delete-checkbox'));
+    if (!selectAll) return;
+
+    const checkedCount = checkboxes.filter(cb => cb.checked).length;
+    selectAll.checked = checkboxes.length > 0 && checkedCount === checkboxes.length;
+    selectAll.indeterminate = checkedCount > 0 && checkedCount < checkboxes.length;
+}
+
+function toggleBulkDeleteLead(ticketId, checked) {
+    if (checked) selectedBulkDeleteIds.add(ticketId);
+    else selectedBulkDeleteIds.delete(ticketId);
+    updateBulkDeleteSelectionState();
+}
+
+function toggleBulkDeleteSelectAll(checked) {
+    const checkboxes = Array.from(document.querySelectorAll('.crm-bulk-delete-checkbox'));
+    checkboxes.forEach(cb => {
+        cb.checked = checked;
+        if (checked) selectedBulkDeleteIds.add(cb.value);
+        else selectedBulkDeleteIds.delete(cb.value);
+    });
+    updateBulkDeleteSelectionState();
+}
+
+function openBulkDeleteLeadsModal() {
+    syncBulkDeleteFiltersFromCRM();
+    const filteredTickets = getBulkDeleteFilteredTickets();
+
+    if (filteredTickets.length === 0) {
+        if (typeof window.swalAlert === 'function') {
+            window.swalAlert('Atencion', 'No hay leads que coincidan con los filtros seleccionados.', 'warning');
+        } else {
+            alert('No hay leads que coincidan con los filtros seleccionados.');
+        }
+        return;
+    }
+
+    selectedBulkDeleteIds = new Set();
+    renderBulkDeleteList(filteredTickets);
+    const modal = document.getElementById('crm-bulk-delete-modal');
+    if (modal) modal.classList.add('active');
+}
+
+async function confirmBulkDeleteSelectedLeads() {
+    const ticketIds = Array.from(selectedBulkDeleteIds);
+    if (ticketIds.length === 0) {
+        if (typeof window.swalAlert === 'function') {
+            window.swalAlert('Atencion', 'Selecciona al menos un lead para eliminar.', 'warning');
+        } else {
+            alert('Selecciona al menos un lead para eliminar.');
+        }
+        return;
+    }
+
+    if (typeof Swal !== 'undefined') {
+        const res = await Swal.fire({
+            title: 'Eliminar leads',
+            text: `Se eliminaran ${ticketIds.length} lead(s) seleccionados. Esta accion no se puede deshacer.`,
+            icon: 'warning',
+            showCancelButton: true,
+            confirmButtonColor: '#ef4444',
+            cancelButtonColor: '#64748b',
+            confirmButtonText: 'Eliminar',
+            cancelButtonText: 'Cancelar'
+        });
+
+        if (!res.isConfirmed) return;
+    } else {
+        if (!confirm(`Eliminar ${ticketIds.length} lead(s)? Esta accion no se puede deshacer.`)) return;
+    }
+
+    showToast(`Eliminando ${ticketIds.length} leads...`, 'info');
+
+    try {
+        const response = await fetch(`/api/backoffice/crm/bulk-delete-leads?token=${activeToken}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ticketIds })
+        });
+
+        const data = await response.json();
+        if (data.success) {
+            closeBulkDeleteLeadsModal();
+            showToast(`Se eliminaron ${data.deletedCount || ticketIds.length} leads correctamente`, 'success');
+            await syncCRM();
+        } else {
+            throw new Error(data.error || 'Error al eliminar');
+        }
+    } catch (e) {
+        console.error('[bulkDeleteLeads] Error:', e);
+        showToast('Error al eliminar leads: ' + e.message, 'error');
+    }
+}
+function renderLeadTags() {
+    const ticket = allTickets.find(t => t.id === currentEditId);
+    if (!ticket) return;
+    const lead = allLeads.find(l => l.id === ticket.chat_id);
+    const assignedTagIds = (lead?.tags || []).map(t => typeof t === 'string' ? t : t.id);
+
+    const currentList = document.getElementById('current-lead-tags');
+    const availableList = document.getElementById('available-tags-to-assign');
+    if (!currentList || !availableList) return;
+
+    // Etiquetas actuales
+    currentList.innerHTML = (lead?.tags || []).map(t => {
+        const tag = typeof t === 'string' ? botTags.find(bt => bt.id === t) : t;
+        if (!tag) return '';
+        return `
+            <div class="tag-pill" style="background:${tag.color || '#6366f1'}">
+                ${tag.name} <i class="fas fa-times" onclick="removeTagFromLead('${tag.id}')" style="margin-left:5px; cursor:pointer;"></i>
+            </div>
+        `;
+    }).join('');
+
+    // Gestión de etiquetas
+    availableList.innerHTML = botTags.map(t => {
+        const isAssigned = assignedTagIds.includes(t.id);
+        return `
+            <div onclick="${isAssigned ? 'removeTagFromLead' : 'addTagToLead'}('${t.id}')" 
+                 class="tag-pill" 
+                 style="background:${t.color || '#6366f1'}; cursor:pointer; opacity:${isAssigned ? 1 : 0.6}; transform:${isAssigned ? 'scale(1.05)' : 'scale(1)'}; border:${isAssigned ? '2px solid white' : '1px solid transparent'}">
+                ${t.name} ${isAssigned ? '✓' : '+'}
+            </div>
+        `;
+    }).join('');
+}
+
+window.addTagToLead = async (tagId) => {
+    const ticket = allTickets.find(t => t.id === currentEditId);
+    if (!ticket) return;
+    
+    try {
+        const res = await fetch(`/api/backoffice/chats/${encodeURIComponent(ticket.chat_id)}/tags?token=${activeToken}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tagId })
+        });
+        if (res.ok) {
+            // Actualizar localmente el lead
+            const lead = allLeads.find(l => l.id === ticket.chat_id);
+            if (lead) {
+                if (!lead.tags) lead.tags = [];
+                const tag = botTags.find(t => t.id === tagId);
+                if (tag) lead.tags.push(tag);
+            }
+            renderLeadTags();
+            renderBoard();
+        }
+    } catch (e) {
+        console.error(e);
+    }
+};
+
+window.removeTagFromLead = async (tagId) => {
+    const ticket = allTickets.find(t => t.id === currentEditId);
+    if (!ticket) return;
+
+    try {
+        const res = await fetch(`/api/backoffice/chats/${encodeURIComponent(ticket.chat_id)}/tags/${tagId}?token=${activeToken}`, {
+            method: 'DELETE'
+        });
+        if (res.ok) {
+            // Actualizar localmente el lead
+            const lead = allLeads.find(l => l.id === ticket.chat_id);
+            if (lead) {
+                lead.tags = lead.tags.filter(t => (typeof t === 'string' ? t : t.id) !== tagId);
+            }
+            renderLeadTags();
+            renderBoard();
+        }
+    } catch (e) {
+        console.error(e);
+    }
+};
+
+window.syncStatusToColumn = (statusName) => {
+    const col = columns.find(c => c.title === statusName);
+    if (col && currentEditId) {
+        if (!crmData[currentEditId]) crmData[currentEditId] = {};
+        crmData[currentEditId].columnId = col.id;
+        console.log(`[CRM] Sincronizando estado ${statusName} con columna ${col.id}`);
+    }
+};
+
+async function updateLeadStatus(chatId, status) {
+    try {
+        await fetch(`/api/backoffice/chat/${chatId}/contact?token=${activeToken}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ crm_status: status })
+        });
+    } catch (e) {
+        console.error('[CRM] Error actualizando status:', e);
+    }
+}
+
+window.addNewNoteUI = () => {
+    const container = document.getElementById('additional-notes-list');
+    const date = new Date().toLocaleDateString();
+    const noteDiv = document.createElement('div');
+    noteDiv.className = 'modal-section';
+    noteDiv.innerHTML = `
+        <label style="color:var(--primary); font-size:0.8rem; font-weight:600;">
+            <i class="fas fa-plus"></i> Nota Adicional ${date}
+        </label>
+        <textarea class="crm-input additional-note-box" rows="2" placeholder="Escribe aquí la nota adicional..."></textarea>
+    `;
+    container.appendChild(noteDiv);
+}
+
+window.openWhatsAppDirect = () => {
+    const phone = document.getElementById('edit-lead-phone').value;
+    if (!phone || phone === 'Desconocido') {
+        showToast('No hay un número válido registrado.', 'error');
+        return;
+    }
+    // Limpiar el número de cualquier caracter no numérico (especialmente para wa.me)
+    const cleanPhone = phone.replace(/\D/g, '');
+    window.open(`https://wa.me/${cleanPhone}`, '_blank');
+}
+
+function closeCardModal() {
+    document.getElementById('card-modal').classList.remove('active');
+}
+
+// --- Creación Manual de Leads ---
+function openNewLeadModal() { document.getElementById('new-lead-modal').classList.add('active'); }
+function closeNewLeadModal() { document.getElementById('new-lead-modal').classList.remove('active'); }
+window.openNewLeadModal = openNewLeadModal;
+window.closeNewLeadModal = closeNewLeadModal;
+
+// Re-engancha onsubmit en cada visita SPA (top-level no re-ejecuta en re-visits)
+function _setupCRMFormHandlers() {
+    const cardForm = document.getElementById('card-edit-form');
+    if (cardForm) cardForm.onsubmit = async (e) => {
+        e.preventDefault();
+        if (!currentEditId) return;
+
+        const ticket = allTickets.find(t => t.id === currentEditId);
+        const chatId = ticket?.chat_id;
+        const metadata = crmData[currentEditId] || { columnId: 'UNASSIGNED' };
+        const columnTitle = columns.find(c => c.id === metadata.columnId)?.title || 'CRM';
+
+        let mainNotes = document.getElementById('edit-custom-notes').value;
+        const additionalNotes = Array.from(document.querySelectorAll('.additional-note-box'))
+            .map(box => box.value.trim())
+            .filter(val => val !== '');
+
+        if (additionalNotes.length > 0) {
+            const date = new Date().toLocaleDateString();
+            mainNotes += `\n\n--- [${columnTitle}] Added on ${date} ---\n` + additionalNotes.join('\n');
+        }
+
+        const leadData = {
+            name: document.getElementById('edit-lead-name').value,
+            email: document.getElementById('edit-lead-email').value,
+            source: document.getElementById('edit-lead-source').value,
+            cuit_dni: document.getElementById('edit-lead-cuit').value,
+            address: document.getElementById('edit-lead-address').value,
+            tax_status: document.getElementById('edit-lead-tax-status').value,
+            offered_product: document.getElementById('edit-lead-offered-product').value,
+            crm_status: document.getElementById('edit-lead-status').value,
+            crm_due_date: document.getElementById('edit-alert-date').value || null,
+            priority: document.getElementById('edit-priority').value || 'Media',
+            notes: mainNotes
+        };
+
+        metadata.alertDate = document.getElementById('edit-alert-date').value;
+        metadata.priority = document.getElementById('edit-priority').value;
+        metadata.customNotes = leadData.notes;
+        metadata.columnId = leadData.crm_status;
+        crmData[currentEditId] = metadata;
+
+        const ticketTitle = document.getElementById('edit-ticket-title').value;
+        showToast('Guardando...', 'info');
+
+        try {
+            await saveCRMMetadata();
+            const ticketRes = await fetch(`/api/backoffice/crm/ticket/${currentEditId}?token=${activeToken}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ titulo: ticketTitle, priority: leadData.priority, notas: mainNotes, contact: leadData })
+            });
+            const ticketJson = await ticketRes.json().catch(() => ({}));
+            if (!ticketRes.ok || ticketJson.success === false) {
+                throw new Error(ticketJson.error || `Error ${ticketRes.status} al guardar el ticket`);
+            }
+
+            if (chatId) {
+                const assignee = document.getElementById('edit-lead-assignee').value;
+                await fetch(`/api/backoffice/chat/assign?token=${activeToken}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ chatId, userId: assignee || null })
+                });
+            }
+            closeCardModal();
+            await syncCRM();
+            showToast('Ficha de cliente actualizada', 'success');
+        } catch (e) {
+            console.error('Error al guardar:', e);
+            showToast('Error al guardar ficha', 'error');
+        }
+    };
+
+    const leadForm = document.getElementById('new-lead-form');
+    if (leadForm) leadForm.onsubmit = async (e) => {
+        e.preventDefault();
+        const chatId = document.getElementById('new-lead-id').value.trim();
+        const name = document.getElementById('new-lead-name').value.trim();
+        const product = document.getElementById('new-lead-product').value.trim();
+
+        showToast('Creando Lead Card...', 'info');
+        try {
+            const res = await fetch(`/api/backoffice/chat/manual-lead?token=${activeToken}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    chatId,
+                    details: { name, offered_product: product, source: 'Manual CRM', notes: `Lead creado manualmente: ${product}` }
+                })
+            });
+            const data = await res.json();
+            if (data.success) {
+                closeNewLeadModal();
+                await syncCRM();
+                showToast('Lead Card creada con éxito', 'success');
+                if (data.ticket?.id) setTimeout(() => openCardModal(data.ticket.id), 500);
+            } else throw new Error(data.error);
+        } catch (err) {
+            showToast('Error: ' + err.message, 'error');
+        }
+    };
+}
+
+// --- Gestión de Columnas ---
+let editingColIdx = -1;
+function editColumn(colId) {
+    const idx = columns.findIndex(c => c.id === colId);
+    if (idx === -1 || columns[idx].fixed) return;
+    
+    editingColIdx = idx;
+    document.getElementById('column-name-input').value = columns[idx].title;
+    document.getElementById('column-modal').classList.add('active');
+}
+
+function closeColumnModal() {
+    document.getElementById('column-modal').classList.remove('active');
+    editingColIdx = -1;
+}
+
+function saveColumnName() {
+    if (editingColIdx === -1) return;
+    const newName = document.getElementById('column-name-input').value.trim();
+    if (newName) {
+        columns[editingColIdx].title = newName;
+        saveCRMState();
+        renderBoard();
+        closeColumnModal();
+    }
+}
+
+function addNewColumn() {
+    if (columns.length >= 10) {
+        showToast('Máximo de 10 columnas alcanzado', 'error');
+        return;
+    }
+    const newId = 'col-' + Date.now();
+    columns.push({ id: newId, title: 'Nueva Etapa' });
+    saveCRMState();
+    renderBoard();
+    editColumn(newId);
+}
+
+async function deleteCurrentColumn() {
+    if (editingColIdx === -1) return;
+    const cards = document.querySelectorAll(`#cards-${columns[editingColIdx].id} .kanban-card`);
+    if (cards.length > 0) {
+        if (!await window.swalConfirm('¿Eliminar columna?', 'Esta columna tiene tickets. ¿Seguro que quieres eliminarla? Los tickets volverán a Nuevos.')) return;
+        cards.forEach(card => {
+            const tid = card.dataset.id;
+            if (crmData[tid]) crmData[tid].columnId = 'UNASSIGNED';
+        });
+        saveCRMMetadata();
+    }
+    columns.splice(editingColIdx, 1);
+    saveCRMState();
+    renderBoard();
+    closeColumnModal();
+}
+
+// --- Utilidades ---
+function getPriorityColor(priority) {
+    switch (priority) {
+        case 'Alta': return '#ef4444';
+        case 'Media': return '#f59e0b';
+        case 'Baja': return '#10b981';
+        default: return '#cbd5e1';
+    }
+}
+
+function getAlertClass(date) {
+    if (!date) return '';
+    const today = new Date().toISOString().split('T')[0];
+    if (date < today) return 'alert-active';
+    if (date === today) return 'alert-today';
+    return '';
+}
+
+function checkAlertsVisual() {
+    const today = new Date().toISOString().split('T')[0];
+    for (const tid in crmData) {
+        const metadata = crmData[tid];
+        const el = document.getElementById(`alert-card-${tid}`);
+        if (el && metadata.alertDate) {
+            el.className = 'card-alert ' + getAlertClass(metadata.alertDate);
+        }
+    }
+}
+
+function formatDate(dateStr) {
+    if (!dateStr) return '';
+    const d = new Date(dateStr);
+    return d.toLocaleDateString([], { day: '2-digit', month: '2-digit' });
+}
+
+
+
+// --- Cierre de Leads ---
+window.confirmCloseTicket = async (ticketId) => {
+    if (!await window.swalConfirm('¿Seguro quieres cerrar este lead?', 'Se moverá al historial de cerrados.')) return;
+    
+    showToast('Cerrando lead...', 'info');
+    try {
+        // 1. Guardar metadatos con fecha de cierre
+        if (!crmData[ticketId]) crmData[ticketId] = {};
+        crmData[ticketId].closedAt = new Date().toISOString();
+        await saveCRMMetadata();
+
+        // 2. Actualizar estado del ticket
+        await fetch(`/api/backoffice/tickets/${ticketId}?token=${activeToken}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ estado: 'Cerrado' })
+        });
+
+        await syncCRM(); // Refrescar tablero
+        showToast('Lead cerrado con éxito', 'success');
+    } catch (e) {
+        console.error('Error cerrando ticket:', e);
+        showToast('Error al cerrar ticket', 'error');
+    }
+};
+
+window.openClosedLeadsModal = async () => {
+    const modal = document.getElementById('closed-leads-modal');
+    const list = document.getElementById('closed-leads-list');
+    if (!modal || !list) return;
+    modal.classList.add('active');
+    list.innerHTML = '<div style="text-align:center; padding:20px;"><i class="fas fa-spinner fa-spin"></i> Cargando historial...</div>';
+    
+    try {
+        const res = await fetch(`/api/backoffice/tickets?token=${activeToken}&estado=Cerrado`);
+        const closedTickets = await res.json();
+        
+        if (!closedTickets || closedTickets.length === 0) {
+            list.innerHTML = '<div style="text-align:center; padding:40px; color:var(--text-muted);">No hay leads cerrados.</div>';
+            return;
+        }
+
+        // Filtro estricto: Solo mostrar si el estado es 'Cerrado' y TIENE fecha de cierre en metadata
+        const validClosed = closedTickets.filter(t => {
+            const metadata = crmData[t.id] || {};
+            return t.estado === 'Cerrado' && metadata.closedAt;
+        });
+
+        if (validClosed.length === 0) {
+            list.innerHTML = '<div style="text-align:center; padding:40px; color:var(--text-muted);">No hay registros completos de cierre todavía.</div>';
+            return;
+        }
+
+        list.innerHTML = validClosed.map(t => {
+            const metadata = crmData[t.id] || {};
+            const closedDate = metadata.closedAt ? new Date(metadata.closedAt).toLocaleString() : 'Fecha no registrada';
+            const lead = allLeads.find(l => l.id === t.chat_id);
+            
+            return `
+                <div class="closed-item" style="display:flex; justify-content:space-between; align-items:center; padding:15px; border-bottom:1px solid var(--border); background:var(--bg-card); border-radius:12px; margin-bottom:10px;">
+                    <div>
+                        <div style="font-weight:700; color:var(--text-main); font-size:1.1rem;">${t.titulo || 'Sin título'}</div>
+                        <div style="font-size:0.9rem; color:var(--text-muted);"><i class="fas fa-user"></i> ${lead?.name || 'Lead sin nombre'} | <i class="fas fa-phone"></i> ${t.chat_id?.split('@')[0]}</div>
+                        <div style="font-size:0.8rem; color:var(--accent); margin-top:5px;"><i class="fas fa-calendar-check"></i> Cerrado el: ${closedDate}</div>
+                    </div>
+                    <div style="display:flex; gap:10px;">
+                        <button class="btn-card-action" onclick="localStorage.setItem('activeChat', '${t.chat_id}'); if(window.navigate) window.navigate('/conversaciones'); else window.location.href='/conversaciones';" title="Ver Chat">
+                            <i class="fas fa-comments"></i>
+                        </button>
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+    } catch (e) {
+        console.error(e);
+        list.innerHTML = '<div style="color:#ef4444; text-align:center; padding:20px;">Error cargando historial de cerrados.</div>';
+    }
+};
+
+window.closeClosedLeadsModal = () => {
+    document.getElementById('closed-leads-modal').classList.remove('active');
+};
+
+// --- Gestión de Usuarios (Equipo) ---
+
+async function loadTeam() {
+    try {
+        const res = await fetch(`/api/backoffice/users?token=${activeToken}`);
+        teamUsers = await res.json();
+        if (isAdmin) {
+            renderUsersList();
+        }
+        renderAssigneeSelect();
+    } catch (e) {
+        console.error('Error al cargar equipo:', e);
+    }
+}
+
+function renderUsersList() {
+    const list = document.getElementById('users-list');
+    if (!list) return;
+    list.innerHTML = teamUsers.map(u => `
+        <div style="padding: 12px 15px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center;">
+            <div style="display:flex; align-items:center; gap:12px;">
+                <div style="width:32px; height:32px; background:var(--bg); border-radius:50%; display:flex; align-items:center; justify-content:center; color:var(--accent);">
+                    <i class="fas fa-user"></i>
+                </div>
+                <div>
+                    <strong style="color:var(--text); font-size: 0.95rem;">${u.username}</strong>
+                    <div style="font-size: 11px; color: var(--text-dim);">${u.role === 'admin' ? 'Administrador' : 'Operador'}</div>
+                </div>
+            </div>
+            <span class="status-badge" style="background: ${u.role === 'admin' ? '#6366f1' : '#059669'}; color: white; border: none; font-size: 10px; padding: 4px 8px;">
+                ${u.role.toUpperCase()}
+            </span>
+        </div>
+    `).join('') || '<div style="padding: 30px; text-align: center; color: var(--text-dim);">No hay usuarios registrados</div>';
+}
+
+function renderAssigneeSelect() {
+    const select = document.getElementById('edit-lead-assignee');
+    if (!select) return;
+    const currentVal = select.value;
+    select.innerHTML = '<option value="">Sin asignar (Libre)</option>' +
+        teamUsers.map(u => `<option value="${u.id}">${u.username} (${u.role})</option>`).join('');
+    select.value = currentVal;
+    _csdRebuild('edit-lead-assignee');
+    _csdSync('edit-lead-assignee');
+}
+
+// --- Configuración Dinámica del CRM ---
+// fetchCRMConfig y render/save fields modal config ahora están en crm-common.js
+
+// --- Tasks Dashboard Logic ---
+window.toggleTasksDashboard = () => {
+    const panel = document.getElementById('tasks-dashboard');
+    panel.classList.toggle('active');
+    if (panel.classList.contains('active')) {
+        loadTasksDashboard();
+    }
+};
+
+async function loadTasksDashboard() {
+    const container = document.getElementById('tasks-list-content');
+    if (!container) return;
+
+    try {
+        const res = await fetch(`/api/backoffice/crm/tasks?token=${activeToken}`);
+        const tasks = await res.json();
+
+        if (!tasks || tasks.length === 0) {
+            container.innerHTML = '<div class="tasks-empty">No hay tareas pendientes para los próximos días.</div>';
+            return;
+        }
+
+        const todayStr = new Date().toISOString().split('T')[0];
+
+        container.innerHTML = tasks.map(t => {
+            const dateStr = t.crm_due_date ? t.crm_due_date.split('T')[0] : '';
+            const isToday = dateStr === todayStr;
+            const isOverdue = dateStr < todayStr;
+            const statusClass = isToday ? 'today' : (isOverdue ? 'overdue' : '');
+            
+            return `
+                <div class="task-item ${statusClass}" onclick="openCardModalFromTask('${t.id}')">
+                    <div class="task-date">${formatDate(dateStr)} ${isToday ? '(HOY)' : (isOverdue ? '(VENCIDO)' : '')}</div>
+                    <div class="task-title">${t.name || 'Lead sin nombre'}</div>
+                    <div class="task-lead"><i class="fas fa-tasks"></i> Estado: ${t.crm_status || 'NUEVO'}</div>
+                    <div style="font-size:0.7rem; opacity:0.6; margin-top:5px;">ID: ${t.id.split('@')[0]}</div>
+                </div>
+            `;
+        }).join('');
+    } catch (e) {
+        console.error('[Tasks] Error:', e);
+        container.innerHTML = '<div class="tasks-empty" style="color:#ef4444;">Error al cargar tareas.</div>';
+    }
+}
+
+async function openCardModalFromTask(chatId) {
+    // Buscar el ticket asociado a este chat
+    const ticket = allTickets.find(t => t.chat_id === chatId);
+    if (ticket) {
+        openCardModal(ticket.id);
+    } else {
+        // Si no hay ticket abierto en el tablero, saltar al backoffice
+        localStorage.setItem('activeChat', chatId);
+        window.location.href = '/conversaciones';
+    }
+}
+window.openCardModalFromTask = openCardModalFromTask;
+
+// --- Real-time Updates via Socket.IO ---
+/* global io */
+function _initKanbanScrollBehavior() {
+    const board = document.getElementById('kanban-board');
+    if (!board || board._scrollBound) return;
+    board._scrollBound = true;
+    board.addEventListener('wheel', (e) => {
+        if (e.target.closest('.kanban-cards')) return;
+        e.preventDefault();
+        board.scrollLeft += e.deltaY + e.deltaX;
+    }, { passive: false });
+}
+
+function scheduleSocketSyncCRM() {
+    if (socketSyncTimer) clearTimeout(socketSyncTimer);
+    socketSyncTimer = setTimeout(() => syncCRM({ silent: true }), 250);
+}
+
+function onContactUpdated(payload) {
+    console.log('[Socket CRM] Contacto actualizado:', payload.chatId);
+    scheduleSocketSyncCRM();
+}
+
+function onTicketUpdated(payload) {
+    console.log('[Socket CRM] Ticket actualizado o nuevo');
+    scheduleSocketSyncCRM();
+}
+
+function onNewMessage(payload) {
+    // Opcional: mostrar una notificación visual si llega un mensaje nuevo a un lead activo
+}
+
+window.destroyCRM = function() {
+    isSyncingCRM = false;
+    queuedSyncCRM = false;
+    crmViewRunId++;
+    console.log('🧹 [CRM] Limpiando recursos y socket listeners');
+    if (window.crmSocket) {
+        window.crmSocket.off('contact_updated', onContactUpdated);
+        window.crmSocket.off('ticket_updated', onTicketUpdated);
+        window.crmSocket.off('new_message', onNewMessage);
+    }
+    if (window._crmAlertInterval) {
+        clearInterval(window._crmAlertInterval);
+        window._crmAlertInterval = null;
+    }
+    if (socketSyncTimer) {
+        clearTimeout(socketSyncTimer);
+        socketSyncTimer = null;
+    }
+};
+})();

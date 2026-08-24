@@ -1,0 +1,315 @@
+@layer components {
+  .webchat-page {
+    width: 100%;
+    min-height: 0;
+  }
+
+  .webchat-workspace {
+    width: 100%;
+    min-height: 0;
+    flex: 1 1 auto;
+    display: grid;
+    grid-template-columns: minmax(0, 1.55fr) minmax(320px, 0.45fr);
+    gap: 0;
+    align-items: stretch;
+    margin: 0;
+  }
+
+  .webchat-container {
+    min-width: min(100%, 320px);
+    max-width: none;
+    overflow: hidden;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .webchat-input-row {
+    border-top: 1px solid rgba(0, 153, 255, 0.1);
+  }
+
+  .webchat-input-wrapper {
+    min-height: 44px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(0, 153, 255, 0.12);
+  }
+
+  [data-theme="light"] .webchat-input-wrapper {
+    background: rgba(255, 255, 255, 0.82);
+    border-color: rgba(37, 99, 235, 0.16);
+  }
+
+  .webchat-textarea {
+    min-height: 24px;
+    max-height: calc((1.35rem * 6) + 0.5rem);
+    line-height: 1.35rem;
+    resize: none;
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+  }
+
+  .webchat-textarea::placeholder {
+    color: var(--text-muted);
+    opacity: 0.78;
+  }
+
+  .webchat-command-panel {
+    min-height: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    border-radius: 0;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .webchat-command-head {
+    padding: 1.35rem 1.5rem 1.2rem;
+    border-bottom: 1px solid rgba(0, 153, 255, 0.12);
+  }
+
+  .webchat-command-title {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+
+  .webchat-command-icon {
+    width: 3rem;
+    height: 3rem;
+    display: grid;
+    place-items: center;
+    flex: 0 0 auto;
+    border-radius: 1rem;
+    color: #0099FF;
+    background: rgba(0, 153, 255, 0.12);
+  }
+
+  .webchat-command-icon i {
+    color: #0099FF !important;
+    font-size: 1.25rem;
+    line-height: 1;
+  }
+
+  .webchat-command-kicker {
+    display: inline-flex;
+    margin-bottom: 0.25rem;
+    color: var(--accent-bright);
+    font-size: 0.7rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .webchat-command-title h2 {
+    margin: 0;
+    color: var(--text-main);
+    font-family: 'Montserrat', sans-serif;
+    font-size: clamp(1.25rem, 1.1vw, 1.65rem);
+    font-weight: 800;
+    line-height: 1.2;
+  }
+
+  .webchat-command-title p {
+    margin: 0.3rem 0 0;
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    line-height: 1.45;
+  }
+
+  .webchat-command-body {
+    padding: 1.25rem 1.5rem;
+    display: grid;
+    gap: 0.85rem;
+    overflow-y: auto;
+  }
+
+  .webchat-command-card {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+    align-items: stretch;
+    padding: 0;
+    overflow: hidden;
+    border-radius: 0.85rem;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(0, 153, 255, 0.12);
+  }
+
+  [data-theme="light"] .webchat-command-card {
+    background: rgba(255, 255, 255, 0.72);
+    border-color: rgba(0, 153, 255, 0.16);
+  }
+
+  .webchat-command-copy {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.85rem;
+    min-width: 0;
+    padding: 0.95rem;
+  }
+
+  .webchat-command-action-icon {
+    width: 2.35rem;
+    height: 2.35rem;
+    display: grid;
+    place-items: center;
+    flex: 0 0 auto;
+    border-radius: 0.75rem;
+    color: #0099FF;
+    background: rgba(0, 153, 255, 0.12);
+  }
+
+  [data-theme="light"] .webchat-command-icon,
+  [data-theme="light"] .webchat-command-action-icon {
+    color: #0078D4;
+    background: rgba(0, 120, 212, 0.08);
+  }
+
+  [data-theme="light"] .webchat-command-icon i,
+  [data-theme="light"] .webchat-command-action-icon i {
+    color: #0078D4 !important;
+  }
+
+  .webchat-command-action-icon i,
+  .webchat-actions-trigger i {
+    color: #0099FF !important;
+    line-height: 1;
+  }
+
+  [data-theme="light"] .webchat-command-action-icon i,
+  [data-theme="light"] .webchat-actions-trigger i {
+    color: #0078D4 !important;
+  }
+
+  .webchat-command-card h3 {
+    margin: 0;
+    color: var(--text-main);
+    font-size: 0.95rem;
+    font-weight: 800;
+  }
+
+  .webchat-command-card p {
+    margin: 0.25rem 0 0;
+    color: var(--text-muted);
+    font-size: 0.82rem;
+    line-height: 1.35;
+  }
+
+  .webchat-command-card-footer {
+    display: flex;
+    padding: 0.75rem 0.95rem;
+    border-top: 1px solid rgba(0, 153, 255, 0.16);
+    background: rgba(0, 153, 255, 0.035);
+  }
+
+  [data-theme="light"] .webchat-command-card-footer {
+    background: rgba(0, 153, 255, 0.04);
+    border-top-color: rgba(0, 153, 255, 0.16);
+  }
+
+  .webchat-command-button {
+    width: 100%;
+    min-height: 2.7rem;
+    padding-inline: 1rem;
+    white-space: nowrap;
+    justify-self: stretch;
+    border-radius: 0.65rem;
+    border: 1px solid rgba(0, 153, 255, 0.16);
+  }
+
+  .webchat-command-button:disabled {
+    opacity: 0.65;
+    cursor: wait;
+    transform: none;
+  }
+
+  .webchat-command-note {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.75rem 0.9rem;
+    color: var(--text-muted);
+    font-size: 0.82rem;
+    line-height: 1.35;
+    border-radius: 0.8rem;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px dashed rgba(0, 153, 255, 0.18);
+  }
+
+  .webchat-command-note i {
+    color: var(--accent-bright);
+  }
+  .webchat-actions-trigger {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    min-height: 2.5rem;
+    padding: 0 0.9rem;
+    border-radius: 9999px;
+    border: 1px solid rgba(0, 153, 255, 0.2);
+    color: var(--accent-bright);
+    background: rgba(255, 255, 255, 0.08);
+    font-family: 'Montserrat', sans-serif;
+    font-size: 0.82rem;
+    font-weight: 800;
+    cursor: pointer;
+    transition: transform 0.14s ease, background 0.14s ease, border-color 0.14s ease;
+  }
+
+  .webchat-actions-trigger:hover {
+    transform: scale(0.96);
+    background: rgba(0, 153, 255, 0.15);
+    border-color: rgba(0, 153, 255, 0.25);
+  }
+
+  [data-theme="light"] .webchat-actions-trigger {
+    background: rgba(0, 153, 255, 0.1);
+    border-color: rgba(0, 153, 255, 0.18);
+  }
+
+  [data-theme="light"] .webchat-actions-trigger:hover {
+    background: rgba(0, 153, 255, 0.15);
+    border-color: rgba(0, 153, 255, 0.25);
+  }
+
+  .webchat-actions-modal-body {
+    display: grid;
+    gap: 0.85rem;
+  }
+  @media (max-width: 1024px) {
+    .webchat-workspace {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .webchat-command-panel {
+      display: none;
+    }
+
+    .webchat-actions-trigger {
+      display: inline-flex;
+    }
+
+    #header .webchat-actions-trigger {
+      order: 3;
+      margin-left: auto;
+    }
+
+    #header #avatar {
+      order: 1;
+    }
+
+    #header #avatar + div {
+      order: 2;
+      min-width: 0;
+    }
+  }
+
+  @media (max-width: 767px) {
+    .webchat-workspace {
+      width: 100%;
+    }
+  }
+}

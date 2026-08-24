@@ -1,0 +1,877 @@
+/* global loadViewScript, FB, fetchChats, jumpToCRM, _boBotTags, _tagStyle */
+window.backofficeView = {
+    title: (window.BOT_NAME || 'Backoffice') + ' - Conversaciones',
+
+    getHTML() {
+        return `
+        <!-- Contenido principal del backoffice -->
+        <div class="flex flex-col flex-1 h-full min-h-0 overflow-hidden" style="position:relative;">
+            ${window.renderSectionTabs ? window.renderSectionTabs('messaging') : ''}
+            <div class="flex flex-1 min-h-0 overflow-hidden" style="position:relative;">
+
+            <!-- Sidebar chats -->
+            <div id="sidebar">
+                <div class="sidebar-header">
+                    <div class="search-wrapper sidebar-search-wrapper">
+                        <i class="fas fa-search search-icon"></i>
+                        <input type="text" id="search-input" class="search-input" placeholder="Buscar conversaci&oacute;n..." oninput="handleSearch()">
+                    </div>
+                    <div class="sidebar-header-actions">
+                        <button class="btn-icon-wa" title="Vaciar Contactos" onclick="confirmClearContacts()" id="btn-clear-contacts">
+                            <i class="fas fa-trash-alt"></i>
+                        </button>
+                        <button class="btn-icon-wa" title="Sincronizar Contactos" onclick="startContactSync()" id="btn-sync-baileys">
+                            <i class="fas fa-sync-alt"></i>
+                        </button>
+                        <button class="btn-icon-wa" title="Importar Contactos (Excel)" onclick="toggleImportModal()" id="btn-import-extern">
+                            <i class="fas fa-file-import"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Selector de CRM consolidado (Multi-CRM) -->
+                <div id="multi-crm-selector-container" style="display:none; padding:8px 16px; border-bottom:1px solid var(--border); background:var(--bg-header);">
+                    <select id="multi-crm-service-filter" onchange="filterChatsByService(this.value)" style="width:100%; padding:6px 10px; border-radius:8px; background:var(--bg-secondary); border:1px solid var(--border); color:var(--text-main); font-size:0.8rem; font-weight:600; outline:none; cursor:pointer;">
+                        <option value="all">Ver Todos los CRMs</option>
+                    </select>
+                </div>
+                <div class="search-container">
+                    <div class="chat-filter-row">
+                        <div id="unread-filter-container" class="unread-filter-compact" style="display:none;">
+                            <button type="button" id="unread-filter-all" class="unread-filter-btn active" onclick="toggleUnreadFilter(false)">Todos</button>
+                            <button type="button" id="unread-filter-unread" class="unread-filter-btn" onclick="toggleUnreadFilter(true)">No le&iacute;dos</button>
+                        </div>
+                        <div class="filter-wrapper">
+                            <select id="filter-tag" style="display:none;"><option value="">Etiquetas</option></select>
+                            <div class="tag-filter-split">
+                                <button class="tag-filter-main" onclick="_toggleTagFilter(event)">
+                                    <i class="fas fa-tags"></i>
+                                    <span id="tag-filter-label">Etiquetas</span>
+                                </button>
+                                <button class="tag-filter-chevron" onclick="_toggleTagFilter(event)">
+                                    <i class="fas fa-chevron-down" id="tag-filter-chevron-icon"></i>
+                                </button>
+                            </div>
+                            <ul class="tag-filter-dropdown" id="tag-filter-dropdown"></ul>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="chat-list"></div>
+            </div>
+
+            <!-- Area de chat -->
+            <div id="main-content" style="position:relative;">
+                <!-- Drag and drop overlay -->
+                <div id="chat-drop-overlay" class="chat-drop-overlay" style="display:none;">
+                    <div class="drop-overlay-content">
+                        <i class="fas fa-cloud-arrow-up drop-overlay-icon"></i>
+                        <h3 style="font-size:1.1rem; font-weight:700; margin-bottom:4px;">Soltá el archivo aquí para enviar</h3>
+                        <p style="font-size:0.82rem; opacity:0.75;">Imágenes, videos y documentos</p>
+                    </div>
+                </div>
+                <div id="chat-header" style="display: none;">
+                    <button class="mobile-back-btn" onclick="document.body.classList.remove('mobile-chat-active')" aria-label="Volver">
+                        <i class="fas fa-arrow-left"></i>
+                    </button>
+                    <div class="header-user">
+                        <div class="chat-avatar" id="active-chat-avatar"></div>
+                        <div>
+                            <div class="chat-header-name" id="active-chat-name" style="font-size: 1rem; margin-bottom: -2px;">Selecciona un chat</div>
+                            <div class="chat-header-phone" id="active-chat-phone"></div>
+                            <div id="active-chat-tags"></div>
+                        </div>
+                    </div>
+                    <div class="switch-container" id="header-switch-container">
+                        <div class="header-actions-group">
+                            <!-- Blacklist toggle: solo visible cuando la integración está activa -->
+                            <button class="btn-icon" id="blacklist-toggle-btn"
+                                title="Lista BOT/CRM Desactivado: contacto habilitado"
+                                style="display:none;"
+                                onclick="toggleBlacklist()"
+                                disabled>
+                                <i class="fas fa-ban" style="color:var(--text-muted);"></i>
+                            </button>
+                            <button class="btn-icon" id="open-tags-btn" onclick="toggleTagsPanel()" title="Gestionar Etiquetas" disabled>
+                                <i class="fas fa-tags"></i>
+                            </button>
+                            <button class="btn-icon" id="open-crm-btn" onclick="toggleCRMPanel()" title="Ficha del Cliente" disabled>
+                                <i class="fas fa-user-pen"></i>
+                            </button>
+                            <button class="btn-icon" id="delete-chat-btn" onclick="deleteActiveChat()" title="Eliminar Chat de este Proyecto" style="color:#ef4444;" disabled>
+                                <i class="fas fa-trash-alt"></i>
+                            </button>
+                            <div id="crm-jump-container" style="display: none !important;">
+                                <select id="crm-lead-jump" style="display:none;"></select>
+                                <div class="crm-jump-split">
+                                    <button class="crm-jump-main" onclick="_crmJumpDefault()">
+                                        <i class="fas fa-rocket"></i>
+                                        <span>Ver en CRM</span>
+                                    </button>
+                                    <button class="crm-jump-chevron" onclick="_toggleCRMJumpMenu(event)">
+                                        <i class="fas fa-chevron-down" id="crm-jump-chevron-icon"></i>
+                                    </button>
+                                </div>
+                                <ul class="crm-jump-dropdown-menu" id="crm-jump-dropdown"></ul>
+                            </div>
+                            <!-- Menu 3 puntitos -->
+                            <div class="mobile-header-menu" id="mobile-header-menu-wrap">
+                                <button class="btn-icon" id="mobile-header-menu-btn" onclick="_toggleMobileHeaderMenu(event)" title="Mas opciones">
+                                    <i class="fas fa-ellipsis-vertical"></i>
+                                </button>
+                                <ul class="mobile-header-dropdown" id="mobile-header-dropdown">
+                                    <li onclick="_headerMenuAction('tags')">
+                                        <i class="fas fa-tags"></i> Gestionar Etiquetas
+                                    </li>
+                                    <li onclick="_headerMenuAction('crm')">
+                                        <i class="fas fa-user-pen"></i> Ficha del Cliente
+                                    </li>
+                                    <li id="mobile-blacklist-li" style="display:none;" onclick="_headerMenuAction('blacklist')">
+                                        <i class="fas fa-ban"></i> <span id="mobile-blacklist-label">Lista negra</span>
+                                    </li>
+                                    <li class="mobile-menu-danger" onclick="_headerMenuAction('delete')">
+                                        <i class="fas fa-trash-alt"></i> Eliminar Chat
+                                    </li>
+                                </ul>
+                            </div>
+                        </div>
+                        <div class="header-bot-toggle-wrap">
+                            <label class="switch">
+                                <input type="checkbox" id="bot-toggle" disabled onchange="toggleBot(this.checked)">
+                                <span class="slider round">
+                                    <i class="fas fa-user"></i>
+                                    <i class="fas fa-robot"></i>
+                                </span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="messages">
+                    <div class="welcome-container">
+                        <i class="fas fa-comments welcome-icon"></i>
+                        <h2 class="text-xl font-heading font-bold mb-2">Bienvenido al panel</h2>
+                        <p class="text-sm text-secondary-content">Selecciona un chat a la izquierda para comenzar.</p>
+                    </div>
+                </div>
+
+                <div id="emoji-picker" class="emoji-picker-container" style="display:none;"></div>
+
+                <!-- Popover de Mensajes Rápidos -->
+                <div id="quick-messages-popover" class="quick-messages-popover" style="display: none;">
+                    <div class="qm-header">
+                        <h4>Mensajes Rápidos</h4>
+                        <button class="qm-close-btn" onclick="window.closeCommandPopover('quick', event)"><i class="fas fa-times"></i></button>
+                    </div>
+                    <div class="qm-form">
+                        <input type="text" id="qm-title-input" placeholder="Título para identificarlo..." />
+                        <textarea id="qm-message-input" placeholder="Mensaje rápido..."></textarea>
+                        <button class="qm-save-btn" onclick="window.saveQuickMessage()">Guardar</button>
+                    </div>
+                    <div class="qm-list-container">
+                        <h5>Guardados:</h5>
+                        <div id="qm-list" class="qm-list">
+                            <div class="qm-empty">No hay mensajes rápidos guardados.</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Popover de Plantillas de Meta -->
+                <div id="meta-templates-popover" class="quick-messages-popover meta-templates-popover" style="display: none;">
+                    <div class="qm-header">
+                        <h4><i class="fab fa-whatsapp"></i> Plantillas de Meta</h4>
+                        <button class="qm-close-btn" onclick="window.closeCommandPopover('meta', event)" title="Cerrar"><i class="fas fa-times"></i></button>
+                    </div>
+                    
+                    <!-- Paso 1: Lista y buscador -->
+                    <div id="mt-step-list" class="mt-step-container">
+                        <div class="mt-search-box">
+                            <input type="text" id="mt-search-input" placeholder="Buscar plantilla..." oninput="window.filterMetaTemplates(this.value)" />
+                        </div>
+                        <div id="mt-list" class="qm-list-container mt-list">
+                            <div class="qm-empty">Cargando plantillas de Meta...</div>
+                        </div>
+                    </div>
+
+                    <!-- Paso 2: Vista previa y autocompletado de variables -->
+                    <div id="mt-step-configure" class="mt-step-container mt-step-configure" style="display: none;">
+                        <div class="mt-config-header">
+                            <button class="btn-secondary btn-sm" onclick="window.backToMetaTemplatesList()" title="Volver a la lista">
+                                <i class="fas fa-arrow-left"></i> Volver
+                            </button>
+                            <span id="mt-selected-name"></span>
+                        </div>
+                        <div class="mt-scroll-body">
+                            <div class="mt-preview-box" id="mt-template-preview"></div>
+                            <div class="mt-form-box" id="mt-variables-form"></div>
+                        </div>
+                        <div class="mt-actions-footer">
+                            <button class="btn-cancel" onclick="window.backToMetaTemplatesList()">Cancelar</button>
+                            <button class="btn-primary" id="mt-send-btn" onclick="window.sendMetaTemplateToActiveChat()">
+                                <i class="fas fa-paper-plane icon-mr"></i> Enviar Plantilla
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- File preview overlay -->
+                <div id="file-preview-overlay" style="display:none; position:absolute; inset:0; z-index:50; background:#111; flex-direction:column;">
+                    <div id="file-preview-header" style="display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid rgba(255,255,255,0.1);">
+                        <button onclick="closeFilePreview()" style="background:none;border:none;color:#fff;font-size:1.2rem;cursor:pointer;"><i class="fas fa-times"></i></button>
+                        <span id="file-preview-name" style="color:#fff;font-size:0.85rem;font-weight:600;flex:1;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:0 12px;"></span>
+                        <div style="width:24px;"></div>
+                    </div>
+                    <div id="file-preview-body" style="flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden;padding:16px;"></div>
+                    <div id="file-preview-footer" style="padding:12px 16px;border-top:1px solid rgba(255,255,255,0.1);display:flex;align-items:center;gap:8px;">
+                        <input type="text" id="file-preview-caption" placeholder="Escribe un comentario..." style="flex:1;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:20px;padding:8px 14px;color:#fff;font-size:0.9rem;outline:none;"
+                            onkeydown="if(event.key==='Enter') sendFromPreview()">
+                        <button onclick="sendFromPreview()" style="width:42px;height:42px;border-radius:50%;background:#0078D4;border:none;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:1rem;">
+                            <i class="fas fa-paper-plane"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <div id="input-area" style="display: none;">
+                    <div id="reply-preview-container" style="display:none;">
+                        <div class="reply-preview-title"><i class="fas fa-reply"></i> Respondiendo a</div>
+                        <div id="reply-preview-text"></div>
+                        <button class="reply-preview-close" onclick="window.cancelReply()" title="Cancelar respuesta"><i class="fas fa-times"></i></button>
+                    </div>
+                    <div class="input-plus-menu">
+                        <button class="btn-icon input-action-btn" id="attach-btn" title="Mas opciones" disabled onclick="_toggleInputPlusMenu(event)">
+                            <i class="fas fa-plus"></i>
+                        </button>
+                        <ul class="input-plus-dropdown" id="input-plus-dropdown">
+                            <li id="input-plus-file-action" onclick="_inputPlusMenuAction('file', event)">
+                                <i class="fas fa-file-arrow-up"></i> Enviar archivo
+                            </li>
+                            <li onclick="_inputPlusMenuAction('quick', event)">
+                                <i class="fas fa-bolt"></i> Mensajes r&aacute;pidos
+                            </li>
+                            <li onclick="_inputPlusMenuAction('meta', event)">
+                                <i class="fab fa-whatsapp"></i> Plantillas express
+                            </li>
+                        </ul>
+                    </div>
+                    <input type="file" id="file-input" style="display:none;" onchange="handleFileSelect(this)">
+                    <div class="input-wrapper" style="position: relative;">
+                        <button class="btn-icon input-action-btn" id="emoji-btn" title="Emojis" disabled onclick="toggleEmojiPicker(event)">
+                            <i class="far fa-face-smile"></i>
+                        </button>
+                        <button class="btn-icon input-action-btn chatbot-toggle-btn" id="chatbot-toggle-btn" title="Chatbot" disabled onclick="window.toggleChatbotForActiveChat()">
+                            <i class="fas fa-robot"></i>
+                        </button>
+                        <button class="btn-icon input-action-btn" id="quick-msg-btn" title="Mensajes Rápidos" disabled onclick="window.toggleQuickMessages(event)">
+                            <i class="fas fa-bolt"></i>
+                        </button>
+                        <button class="btn-icon input-action-btn" id="meta-templates-btn" title="Plantillas de Meta" disabled onclick="window.toggleMetaTemplatesPopover(event)">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" style="display:inline-block; vertical-align:middle; width:18px; height:18px;">
+                                <path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm-1 7V3.5L18.5 9H13zm-1.5 4.5l-2.5 4.5h2l-1 4 4.5-5.5h-2.5l1.5-3h-2z"/>
+                            </svg>
+                        </button>
+                        <textarea id="message-input" placeholder="Escribe un mensaje" disabled
+                            rows="1"
+                            onkeydown="window.handleChatTextareaKey(event, window.sendMessage)"
+                            oninput="window.handleMessageInputChange(this)"
+                            style="flex:1;background:transparent;border:0;outline:none;color:var(--text-main);font-size:16px;padding:2px 0;min-width:0;resize:none;overflow-y:auto;max-height:120px;font-family:inherit;line-height:20px;display:block;"></textarea>
+                    </div>
+                    <button class="btn-icon input-action-btn" id="mic-cancel-btn" title="Descartar grabación de audio" style="display:none; color:#ef4444;" onclick="window.cancelRecording ? window.cancelRecording() : cancelRecording()">
+                        <i class="fas fa-trash-alt"></i>
+                    </button>
+                    <button class="btn-icon input-action-btn" id="mic-btn" title="Grabar audio" disabled onclick="toggleRecording()">
+                        <i class="fas fa-microphone"></i>
+                    </button>
+                    <button class="btn-icon input-action-btn" id="send-btn" title="Enviar mensaje" onclick="sendMessage()" disabled>
+                        <i class="fas fa-paper-plane"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Panel CRM lateral -->
+        <div id="crm-panel">
+            <div class="crm-header">
+                <button class="btn-icon" onclick="toggleCRMPanel()"><i class="fas fa-times"></i></button>
+                <h3>Informacion del Lead</h3>
+            </div>
+            <div class="crm-content">
+                <div class="crm-section" id="crm-fields-container">
+                    <div data-field="crm-ticket-title">
+                        <label><i class="fas fa-ticket-alt"></i> Titulo del Lead / Ticket</label>
+                        <input type="text" id="crm-ticket-title" class="crm-input" placeholder="Titulo...">
+                    </div>
+                    <div data-field="crm-name">
+                        <label>Nombre del Contacto</label>
+                        <input type="text" id="crm-name" class="crm-input" placeholder="Nombre completo">
+                    </div>
+                    <div data-field="crm-phone">
+                        <label><i class="fas fa-phone"></i> Telefono</label>
+                        <div class="phone-input-wrap">
+                            <input type="text" id="crm-phone-side" class="crm-input" placeholder="Ej: 5491122334455">
+                            <button class="phone-wa-btn" id="btn-whatsapp-direct-side" onclick="openWhatsAppDirectSide()">
+                                <i class="fab fa-whatsapp"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div data-field="crm-email">
+                        <label>Correo Electronico</label>
+                        <input type="email" id="crm-email" class="crm-input" placeholder="ejemplo@correo.com">
+                    </div>
+                    <div data-field="crm-cuit">
+                        <label><i class="fas fa-id-card"></i> Cuil / Cuit / DNI</label>
+                        <input type="text" id="crm-cuit" class="crm-input" placeholder="00-00000000-0">
+                    </div>
+                    <div data-field="crm-address">
+                        <label><i class="fas fa-map-marker-alt"></i> Domicilio</label>
+                        <input type="text" id="crm-address" class="crm-input" placeholder="Calle, Nro, Localidad...">
+                    </div>
+                    <div data-field="crm-tax-status">
+                        <label><i class="fas fa-file-invoice-dollar"></i> Situacion Impositiva</label>
+                        <div class="csd-wrap">
+                            <select id="crm-tax-status" hidden>
+                                <option value="Cons. Final">Cons. Final</option>
+                                <option value="Responsable Inscripto">Responsable Inscripto</option>
+                                <option value="Monotributo">Monotributo</option>
+                                <option value="Exento">Exento</option>
+                            </select>
+                            <button class="csd-btn" type="button" onclick="_csdToggle(this)">
+                                <span class="csd-label">Cons. Final</span>
+                                <i class="fas fa-chevron-down csd-chevron"></i>
+                            </button>
+                            <div class="csd-menu">
+                                <button class="csd-item selected" type="button" data-val="Cons. Final" onclick="_csdSelect(this,'Cons. Final')">Cons. Final</button>
+                                <button class="csd-item" type="button" data-val="Responsable Inscripto" onclick="_csdSelect(this,'Responsable Inscripto')">Responsable Inscripto</button>
+                                <button class="csd-item" type="button" data-val="Monotributo" onclick="_csdSelect(this,'Monotributo')">Monotributo</button>
+                                <button class="csd-item" type="button" data-val="Exento" onclick="_csdSelect(this,'Exento')">Exento</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div data-field="crm-product">
+                        <label><i class="fas fa-shopping-bag"></i> Producto Ofrecido</label>
+                        <input type="text" id="crm-product" class="crm-input" placeholder="Servicio/Producto...">
+                    </div>
+                    <div data-field="crm-source">
+                        <label><i class="fas fa-bullhorn"></i> Fuente / Canal</label>
+                        <div class="csd-wrap">
+                            <select id="crm-source" hidden>
+                                <option value="">Desconocida</option>
+                                <option value="Instagram">Instagram</option>
+                                <option value="Facebook">Facebook</option>
+                                <option value="WhatsApp">WhatsApp</option>
+                                <option value="Web">Web</option>
+                                <option value="Referido">Referido</option>
+                                <option value="Manual CRM">Manual CRM</option>
+                            </select>
+                            <button class="csd-btn" type="button" onclick="_csdToggle(this)">
+                                <span class="csd-label">Desconocida</span>
+                                <i class="fas fa-chevron-down csd-chevron"></i>
+                            </button>
+                            <div class="csd-menu">
+                                <button class="csd-item selected" type="button" data-val="" onclick="_csdSelect(this,'')">Desconocida</button>
+                                <button class="csd-item" type="button" data-val="Instagram" onclick="_csdSelect(this,'Instagram')">Instagram</button>
+                                <button class="csd-item" type="button" data-val="Facebook" onclick="_csdSelect(this,'Facebook')">Facebook</button>
+                                <button class="csd-item" type="button" data-val="WhatsApp" onclick="_csdSelect(this,'WhatsApp')">WhatsApp</button>
+                                <button class="csd-item" type="button" data-val="Web" onclick="_csdSelect(this,'Web')">Web</button>
+                                <button class="csd-item" type="button" data-val="Referido" onclick="_csdSelect(this,'Referido')">Referido</button>
+                                <button class="csd-item" type="button" data-val="Manual CRM" onclick="_csdSelect(this,'Manual CRM')">Manual CRM</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div data-field="crm-notes">
+                        <label><i class="fas fa-sticky-note"></i> Notas / Observaciones</label>
+                        <textarea id="crm-notes" class="crm-input" rows="4" placeholder="Observaciones..."></textarea>
+                    </div>
+                    <div data-field="crm-due-date">
+                        <label><i class="fas fa-calendar-alt"></i> Fecha de Seguimiento</label>
+                        <input type="date" id="crm-due-date" class="crm-input">
+                    </div>
+                    <div data-field="crm-priority">
+                        <label><i class="fas fa-flag"></i> Prioridad</label>
+                        <div class="csd-wrap">
+                            <select id="crm-priority" hidden>
+                                <option value="Baja">Baja</option>
+                                <option value="Media">Media</option>
+                                <option value="Alta">Alta</option>
+                            </select>
+                            <button class="csd-btn" type="button" onclick="_csdToggle(this)">
+                                <span class="csd-label">Baja</span>
+                                <i class="fas fa-chevron-down csd-chevron"></i>
+                            </button>
+                            <div class="csd-menu">
+                                <button class="csd-item selected" type="button" data-val="Baja" onclick="_csdSelect(this,'Baja')">Baja</button>
+                                <button class="csd-item" type="button" data-val="Media" onclick="_csdSelect(this,'Media')">Media</button>
+                                <button class="csd-item" type="button" data-val="Alta" onclick="_csdSelect(this,'Alta')">Alta</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div data-field="crm-status">
+                        <label><i class="fas fa-tasks"></i> Estado del Lead (CRM)</label>
+                        <div class="csd-wrap">
+                            <select id="crm-status-select-side" hidden></select>
+                            <button class="csd-btn" type="button" onclick="_csdToggle(this)">
+                                <span class="csd-label">Sin Asignar</span>
+                                <i class="fas fa-chevron-down csd-chevron"></i>
+                            </button>
+                            <div class="csd-menu"></div>
+                        </div>
+                    </div>
+                    <button class="btn-success crm-save-btn" onclick="saveCRMDetails()">
+                        <i class="fas fa-save icon-mr"></i> Guardar Ficha de Cliente
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Panel Etiquetas -->
+        <div id="tags-panel" class="tickets-panel">
+            <div class="crm-header">
+                <button class="btn-icon" onclick="toggleTagsPanel()"><i class="fas fa-times"></i></button>
+                <h3>Gestionar Etiquetas</h3>
+            </div>
+            <div class="crm-content">
+                <div class="crm-section">
+                    <h4 class="crm-tags-heading"><i class="fas fa-tags icon-mr"></i> Etiquetas del Chat</h4>
+                    <div id="current-chat-tags-section">
+                        <div id="available-tags-to-assign"></div>
+                    </div>
+                    <div class="tag-create-box">
+                        <h5 class="text-xs font-heading font-bold text-primary-content mb-3">Crear Nueva Etiqueta</h5>
+                        <div class="tag-create-row">
+                            <input type="text" id="new-tag-name" class="crm-input" placeholder="Nombre...">
+                            <input type="color" id="new-tag-color" value="#0078D4">
+                            <button class="btn-icon" onclick="createTag()"><i class="fas fa-plus"></i></button>
+                        </div>
+                    </div>
+                    <div id="tag-list-editor"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Panel Tickets -->
+        <div id="tickets-panel" class="tickets-panel">
+            <div class="panel-header">
+                <h3 class="text-base font-heading font-bold text-primary-content flex items-center gap-2">
+                    <i class="fas fa-ticket-alt text-accent-bright"></i> Tickets
+                </h3>
+                <button class="btn-icon" onclick="toggleTicketsPanel(event)"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="panel-tabs">
+                <button id="tab-pending" class="tab-btn active" onclick="setTicketsFilter('pending')">Pendientes</button>
+                <button id="tab-closed"  class="tab-btn"        onclick="setTicketsFilter('Cerrado')">Cerrados</button>
+            </div>
+            <div id="tickets-list" class="tickets-list">
+                <div class="panel-loading-placeholder">Cargando tickets...</div>
+            </div>
+        </div>
+
+        <!-- Panel Leads -->
+        <div id="leads-panel" class="tickets-panel">
+            <div class="panel-header">
+                <h3 class="text-base font-heading font-bold text-primary-content flex items-center gap-2">
+                    <i class="fas fa-address-book text-accent-bright"></i> Leads Editados
+                </h3>
+                <button class="btn-icon" onclick="toggleLeadsPanel(event)"><i class="fas fa-times"></i></button>
+            </div>
+            <div id="leads-list" class="tickets-list">
+                <div class="panel-loading-placeholder">Cargando leads...</div>
+            </div>
+        </div>
+
+        <!-- Modal Sincronizar -->
+        <div id="sync-modal" class="modal-overlay">
+            <div class="modal-content animate-pop-in" style="max-width:400px;">
+                <div class="modal-header">
+                    <h3><i class="fas fa-sync-alt modal-h3-icon"></i> Sincronizando</h3>
+                </div>
+                <div class="modal-body sync-modal-body">
+                    <div id="sync-loading">
+                        <div class="spinner"></div>
+                        <p class="sync-loading-title text-base font-heading font-semibold text-primary-content mb-1">Importando datos desde WhatsApp...</p>
+                        <p class="sync-loading-desc text-sm text-secondary-content">Esto puede demorar segun la cantidad de contactos.</p>
+                    </div>
+                    <div id="sync-result" style="display:none;">
+                        <i class="sync-success-icon fas fa-check-circle"></i>
+                        <h4 class="sync-success-heading text-lg font-heading font-bold text-primary-content mb-2">Sincronizacion Completada!</h4>
+                        <p id="sync-summary" class="text-sm text-secondary-content mb-5"></p>
+                        <button class="btn-success btn-sync-close" onclick="closeSyncModal()">Entendido</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Modal Importar Excel -->
+        <div id="import-modal" class="modal-overlay">
+            <div class="modal-content animate-pop-in" style="max-width:450px;">
+                <div class="modal-header">
+                    <h3><i class="fas fa-file-excel icon-excel mr-2"></i> Importar Contactos</h3>
+                    <button class="btn-close-modal" onclick="toggleImportModal()"><i class="fas fa-times"></i></button>
+                </div>
+                <div class="modal-body">
+                    <div style="margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.08);">
+                        <button class="btn-primary w-full justify-center" onclick="window.openIndividualContactModal()">
+                            <i class="fas fa-user-plus mr-2"></i> Agregar Contacto Individual
+                        </button>
+                    </div>
+
+                    <p class="text-sm text-secondary-content mb-5">Carga multiples contactos usando una plantilla Excel.</p>
+                    <div class="import-template-section">
+                        <h4 class="text-sm font-heading font-semibold text-primary-content mb-3">1. Descarga la plantilla</h4>
+                        <button class="btn-primary btn-download-template w-full justify-center" onclick="downloadImportTemplate()">
+                            <i class="fas fa-download"></i> Descargar Plantilla .xlsx
+                        </button>
+                    </div>
+                    <div class="import-upload-section">
+                        <h4 class="text-sm font-heading font-semibold text-primary-content mb-3">2. Subi tu archivo completado</h4>
+                        <input type="file" id="import-file-input" class="crm-input mb-3" accept=".xlsx,.xls">
+                        <button class="btn-primary w-full justify-center" onclick="startImportExcel()" id="btn-execute-import">
+                            <i class="fas fa-upload"></i> Iniciar Importacion
+                        </button>
+                    </div>
+                    <div id="import-progress" style="display:none;" class="mt-5">
+                        <div class="import-progress-track">
+                            <div id="import-progress-bar" class="import-progress-bar" style="width:0%"></div>
+                        </div>
+                        <p id="import-status-text" class="import-status-text">Procesando...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Modal Agregar Contacto Individual -->
+        <div id="individual-contact-modal" class="modal-overlay" style="display:none; z-index:9999;">
+            <div class="modal-content animate-pop-in" style="max-width:460px;">
+                <div class="modal-header">
+                    <h3><i class="fas fa-user-plus text-indigo-400 mr-2"></i> Agregar Contacto Individual</h3>
+                    <button class="btn-close-modal" onclick="window.closeIndividualContactModal()"><i class="fas fa-times"></i></button>
+                </div>
+                <div class="modal-body" style="display:flex; flex-direction:column; gap:14px;">
+                    <div>
+                        <label class="text-xs font-semibold text-secondary-content mb-1 block">
+                            <i class="fas fa-phone mr-1"></i> Número de Teléfono (con o sin prefijo):
+                        </label>
+                        <input type="text" id="ind-phone-input" class="crm-input" placeholder="Ej: 2914464733 o 5491122334455" oninput="window.previewNormalizedPhone(this.value)" />
+                        <div id="ind-phone-preview" style="font-size:0.75rem; margin-top:5px; color:#10b981; display:none; background:rgba(16,185,129,0.1); padding:4px 8px; border-radius:6px; border:1px solid rgba(16,185,129,0.2);"></div>
+                    </div>
+                    <div>
+                        <label class="text-xs font-semibold text-secondary-content mb-1 block">
+                            <i class="fas fa-user mr-1"></i> Nombre Completo:
+                        </label>
+                        <input type="text" id="ind-name-input" class="crm-input" placeholder="Ej: Juan Pérez" />
+                    </div>
+                    <div>
+                        <label class="text-xs font-semibold text-secondary-content mb-1 block">
+                            <i class="fas fa-tags mr-1"></i> Asignar Etiquetas Existentes:
+                        </label>
+                        <div id="ind-tags-container" style="max-height:130px; overflow-y:auto; background:rgba(0,0,0,0.25); border:1px solid rgba(255,255,255,0.1); border-radius:8px; padding:10px; display:flex; flex-wrap:wrap; gap:8px;">
+                            <span style="font-size:0.75rem; color:var(--text-muted);">Cargando etiquetas...</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn-cancel" onclick="window.closeIndividualContactModal()">Cancelar</button>
+                    <button class="btn-success" id="btn-save-ind-contact" onclick="window.saveIndividualContact()">
+                        <i class="fas fa-save mr-1"></i> Guardar Contacto
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Lightbox -->
+        <div id="lightbox-modal" class="modal-overlay" onclick="closeLightbox()">
+            <div class="lightbox-content" onclick="event.stopPropagation()">
+                <button class="lightbox-close-btn" onclick="closeLightbox()"><i class="fas fa-times"></i></button>
+                <img id="lightbox-img" src="" alt="zoom">
+                <div class="lightbox-actions">
+                    <a id="lightbox-download-link" href="" download class="btn-primary">
+                        <i class="fas fa-download"></i> Descargar Imagen
+                    </a>
+                </div>
+            </div>
+        </div>
+
+        <!-- Modal Reenviar Multimedia -->
+        <div id="forward-modal" class="modal-overlay">
+            <div class="modal-content animate-pop-in" style="max-width:450px;">
+                <div class="modal-header">
+                    <h3><i class="fas fa-share modal-h3-icon"></i> Enviar mensaje a</h3>
+                    <button class="btn-close-modal" onclick="closeForwardModal()"><i class="fas fa-times"></i></button>
+                </div>
+                <div class="modal-body">
+                    <div class="search-container mb-4" style="padding:0;">
+                        <div class="search-wrapper">
+                            <i class="fas fa-search search-icon"></i>
+                            <input type="text" id="forward-search-input" class="search-input" placeholder="Buscar contacto..." oninput="handleForwardSearch()">
+                        </div>
+                    </div>
+                    <div id="forward-chats-list" style="max-height:300px; overflow-y:auto; border-radius:8px;"></div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn-cancel" onclick="closeForwardModal()">Cancelar</button>
+                </div>
+            </div>
+        </div>
+        </div>`;
+    },
+
+    async init() {
+        // Cargar Facebook SDK si no esta cargado
+        if (!window.FB && !document.querySelector('script[src*="connect.facebook.net"]')) {
+            const fbSdk = document.createElement('script');
+            fbSdk.async = true;
+            fbSdk.defer = true;
+            fbSdk.crossOrigin = 'anonymous';
+            fbSdk.src = 'https://connect.facebook.net/es_LA/sdk.js';
+            document.body.appendChild(fbSdk);
+        }
+
+        // Inicializar FB cuando cargue
+        if (!window.fbAsyncInit) {
+            window.fbAsyncInit = function() {
+                const activeToken = localStorage.getItem('system_config_token') || localStorage.getItem('backoffice_token');
+                fetch('/api/backoffice/whatsapp/config?token=' + activeToken)
+                    .then(res => res.json())
+                    .then(data => {
+                        if (data && data.appId && data.appId !== 'AQUI_TU_ID_DE_APP' && typeof FB !== 'undefined') {
+                            FB.init({ appId: data.appId, cookie: true, xfbml: true, version: 'v25.0' });
+                        }
+                    });
+            };
+        }
+
+        // Cargar backoffice.js si no esta cargado (primera visita)
+        if (!window._backofficeScriptLoaded) {
+            await loadViewScript('/js/backoffice/backoffice.js');
+            window._backofficeScriptLoaded = true;
+        }
+        // Siempre re-inicializar: tanto primera visita como re-visitas
+        // (en primera visita el top-level del script ya corrió fetchChats, pero
+        //  initBackofficeView re-engancha scroll listeners y garantiza carga completa)
+        if (typeof window.initBackofficeView === 'function') {
+            window.initBackofficeView();
+        }
+
+        window.toggleUnreadFilter = function(enabled) {
+            document.getElementById('unread-filter-all')?.classList.toggle('active', !enabled);
+            document.getElementById('unread-filter-unread')?.classList.toggle('active', !!enabled);
+            if (typeof window.executeUnreadFilter === 'function') {
+                window.executeUnreadFilter(enabled);
+            }
+        };
+
+        window._toggleMobileHeaderMenu = function(e) {
+            e.stopPropagation();
+            const d = document.getElementById('mobile-header-dropdown');
+            if (!d) return;
+            const real = document.getElementById('bot-toggle');
+            const mob = document.getElementById('mobile-bot-toggle');
+            if (real && mob) { mob.checked = real.checked; mob.disabled = real.disabled; }
+            const label = document.getElementById('mobile-bot-label');
+            if (label && real) label.textContent = real.checked ? 'Bot: on' : 'Bot: off';
+            const isOpen = d.classList.toggle('open');
+            if (isOpen) document.addEventListener('click', window._closeMobileHeaderMenu, { once: true });
+        };
+        window._closeMobileHeaderMenu = function() {
+            const d = document.getElementById('mobile-header-dropdown');
+            if (d) d.classList.remove('open');
+        };
+        window._toggleInputPlusMenu = function(e) {
+            e.stopPropagation();
+            const d = document.getElementById('input-plus-dropdown');
+            if (!d) return;
+            const isOpen = d.classList.toggle('open');
+            if (isOpen) document.addEventListener('click', window._closeInputPlusMenu, { once: true });
+        };
+        window._closeInputPlusMenu = function() {
+            const d = document.getElementById('input-plus-dropdown');
+            if (d) d.classList.remove('open');
+        };
+        window._inputPlusMenuAction = function(action, event) {
+            event?.stopPropagation?.();
+            const fileAction = document.getElementById('input-plus-file-action');
+            if (action === 'file') {
+                if (fileAction?.classList.contains('disabled')) return;
+                document.getElementById('file-input')?.click();
+            } else if (action === 'quick') {
+                window._openQuickMessagesPopover();
+            } else if (action === 'meta') {
+                window._openMetaTemplatesPopover();
+            }
+            window._closeInputPlusMenu();
+        };
+        window._openQuickMessagesPopover = function() {
+            const popover = document.getElementById('quick-messages-popover');
+            const metaPopover = document.getElementById('meta-templates-popover');
+            if (metaPopover) metaPopover.style.display = 'none';
+            if (!popover || popover.style.display !== 'none') return;
+            popover.style.display = 'flex';
+            window.loadQuickMessages?.();
+        };
+        window._openMetaTemplatesPopover = function() {
+            const popover = document.getElementById('meta-templates-popover');
+            const quickPopover = document.getElementById('quick-messages-popover');
+            if (quickPopover) quickPopover.style.display = 'none';
+            if (!popover || popover.style.display !== 'none') return;
+            popover.style.display = 'flex';
+            window.backToMetaTemplatesList?.();
+            window.loadMetaTemplates?.();
+        };
+        window.handleMessageInputChange = function(input) {
+            window.autoResizeChatTextarea?.(input);
+            const value = input?.value || '';
+            const command = value.startsWith('./') ? 'quick' : (value.startsWith('/') ? 'meta' : '');
+            if (!command) {
+                window._lastInputCommand = '';
+                const quickPopover = document.getElementById('quick-messages-popover');
+                const metaPopover = document.getElementById('meta-templates-popover');
+                if (quickPopover) quickPopover.style.display = 'none';
+                if (metaPopover) metaPopover.style.display = 'none';
+                return;
+            }
+            if (window._lastInputCommand === command) return;
+            window._lastInputCommand = command;
+            if (command === 'quick') window._openQuickMessagesPopover();
+            if (command === 'meta') window._openMetaTemplatesPopover();
+        };
+        window.closeCommandPopover = function(type, event) {
+            event?.stopPropagation?.();
+            const popoverId = type === 'quick' ? 'quick-messages-popover' : 'meta-templates-popover';
+            const popover = document.getElementById(popoverId);
+            if (popover) popover.style.display = 'none';
+            window.clearCommandInputPrefix?.(type);
+        };
+
+        window.clearCommandInputPrefix = function(type) {
+            const input = document.getElementById('message-input');
+            if (input) {
+                const command = type === 'quick' ? './' : '/';
+                if (input.value.startsWith(command)) {
+                    input.value = input.value.slice(command.length).replace(/^\s+/, '');
+                    window._lastInputCommand = '';
+                    window.autoResizeChatTextarea?.(input);
+                    input.focus();
+                }
+            }
+        };
+        window._headerMenuAction = function(action) {
+            const buttonByAction = {
+                tags: 'open-tags-btn',
+                crm: 'open-crm-btn',
+                blacklist: 'blacklist-toggle-btn',
+                delete: 'delete-chat-btn'
+            };
+            const btn = document.getElementById(buttonByAction[action]);
+            if (!btn || btn.disabled) return;
+            btn.click();
+            window._closeMobileHeaderMenu();
+        };
+        window._toggleTagFilter = function(e) {
+            e.stopPropagation();
+            const dd = document.getElementById('tag-filter-dropdown');
+            const icon = document.getElementById('tag-filter-chevron-icon');
+            const label = document.getElementById('tag-filter-label');
+            const select = document.getElementById('filter-tag');
+            if (!dd || !select) return;
+            const cur = select.options[select.selectedIndex];
+            if (label && cur) {
+                if (cur.value) {
+                    const tags = (typeof _boBotTags !== 'undefined') ? _boBotTags : [];
+                    const tag  = tags.find(t => String(t.id) === String(cur.value));
+                    const color = tag ? tag.color : '#6366f1';
+                    label.innerHTML = `<span class="tag-pill" data-tag-color="${color}" style="${_tagStyle(color)}">${cur.textContent}</span>`;
+                } else {
+                    label.textContent = cur.textContent;
+                }
+            }
+            dd.innerHTML = '';
+            Array.from(select.options).forEach(opt => {
+                const li = document.createElement('li');
+                const active = opt.value === select.value;
+                if (opt.value) {
+                    const tags = (typeof _boBotTags !== 'undefined') ? _boBotTags : [];
+                    const tag  = tags.find(t => String(t.id) === String(opt.value));
+                    const color = tag ? tag.color : '#6366f1';
+                    li.innerHTML = `<span class="tag-pill" data-tag-color="${color}" style="${_tagStyle(color)}">${opt.textContent}</span>`;
+                } else {
+                    li.innerHTML = '<i class="fas fa-tags"></i>' + opt.textContent;
+                }
+                if (active) li.classList.add('active');
+                li.onclick = () => {
+                    select.value = opt.value;
+                    if (label) {
+                        label.innerHTML = opt.value
+                            ? li.querySelector('.tag-pill').outerHTML
+                            : opt.textContent;
+                    }
+                    if (typeof fetchChats === 'function') fetchChats(true);
+                    dd.classList.remove('open');
+                    if (icon) icon.style.transform = '';
+                };
+                dd.appendChild(li);
+            });
+            const isOpen = dd.classList.toggle('open');
+            if (icon) icon.style.transform = isOpen ? 'rotate(180deg)' : '';
+            if (isOpen) document.addEventListener('click', () => {
+                dd.classList.remove('open');
+                if (icon) icon.style.transform = '';
+            }, { once: true });
+        };
+        window._crmJumpDefault = function() {
+            const select = document.getElementById('crm-lead-jump');
+            if (!select) return;
+            const first = Array.from(select.options).find(o => o.value);
+            if (!first) return;
+            select.value = first.value;
+            if (typeof jumpToCRM === 'function') jumpToCRM();
+        };
+        window._toggleCRMJumpMenu = function(e) {
+            e.stopPropagation();
+            const dd = document.getElementById('crm-jump-dropdown');
+            const icon = document.getElementById('crm-jump-chevron-icon');
+            if (!dd) return;
+            const select = document.getElementById('crm-lead-jump');
+            dd.innerHTML = '';
+            Array.from(select.options).forEach(opt => {
+                if (!opt.value) return;
+                const li = document.createElement('li');
+                li.innerHTML = '<i class="fas fa-ticket-alt"></i>' + opt.textContent;
+                li.onclick = () => {
+                    select.value = opt.value;
+                    if (typeof jumpToCRM === 'function') jumpToCRM();
+                    dd.classList.remove('open');
+                    if (icon) icon.style.transform = '';
+                };
+                dd.appendChild(li);
+            });
+            if (!dd.children.length) return;
+            const isOpen = dd.classList.toggle('open');
+            if (icon) icon.style.transform = isOpen ? 'rotate(180deg)' : '';
+            if (isOpen) document.addEventListener('click', () => {
+                dd.classList.remove('open');
+                if (icon) icon.style.transform = '';
+            }, { once: true });
+        };
+        window._mobileToggleBotClick = function() {
+            const real = document.getElementById('bot-toggle');
+            const mob = document.getElementById('mobile-bot-toggle');
+            if (!real || real.disabled || !mob) return;
+            mob.checked = !mob.checked;
+            mob.dispatchEvent(new Event('change'));
+        };
+
+        // Manejar parametro openPanel en la URL
+        const urlParams = new URLSearchParams(window.location.search);
+        const panel = urlParams.get('openPanel') || urlParams.get('panel');
+        if (panel) {
+            setTimeout(() => {
+                if (panel === 'leads' && typeof window.navigate === 'function') window.navigate('/contactos');
+                else if (panel === 'tickets' && typeof window.realToggleTickets === 'function') window.realToggleTickets();
+                else if (panel === 'meta' && typeof window.toggleMetaPanel === 'function') window.toggleMetaPanel();
+            }, 400);
+        }
+    },
+
+    destroy() {
+        document.body.classList.remove('mobile-chat-active');
+        if (typeof window._backofficeAbortAll === 'function') window._backofficeAbortAll();
+    }
+};

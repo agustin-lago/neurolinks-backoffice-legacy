@@ -1,0 +1,77 @@
+@layer utilities {
+  /* Page backgrounds */
+  .bg-page {
+    background: linear-gradient(160deg, #071827 0%, #0A2036 35%, #0E2D49 65%, #123C60 100%);
+    @apply fixed inset-0 -z-10;
+  }
+
+  [data-theme="light"] .bg-page {
+    background: linear-gradient(160deg, #f0f4f8 0%, #e8edf4 35%, #dde5f0 65%, #d4dff0 100%);
+  }
+
+  /* Grid sutil */
+  .bg-grid {
+    background-image:
+      linear-gradient(rgba(0, 153, 255, 0.04) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0, 153, 255, 0.04) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+
+  /* Radial glows decorativos */
+  .bg-glow-accent {
+    background: radial-gradient(ellipse, rgba(0, 120, 212, 0.18) 0%, transparent 65%);
+  }
+
+  .bg-glow-blue {
+    background: radial-gradient(ellipse, rgba(0, 180, 216, 0.14) 0%, transparent 65%);
+  }
+
+  .bg-glow-gold {
+    background: radial-gradient(ellipse, rgba(223, 206, 130, 0.08) 0%, transparent 65%);
+  }
+
+  /* Separador de secciones */
+  .section-divider {
+    background: linear-gradient(90deg, transparent, rgba(0, 153, 255, 0.12), transparent);
+    @apply w-full h-px;
+  }
+
+  /* Glows */
+  .glow-accent {
+    box-shadow: 0 0 40px rgba(0, 153, 255, 0.22), 0 0 80px rgba(0, 120, 212, 0.1);
+  }
+
+  .glow-gold {
+    box-shadow: 0 0 40px rgba(223, 206, 130, 0.15), 0 0 80px rgba(223, 206, 130, 0.06);
+  }
+
+  .glow-white {
+    box-shadow: 0 0 30px rgba(255, 255, 255, 0.05);
+  }
+
+  /* Texto con opacidad semÃ¡ntica */
+  .text-primary-content {
+    @apply text-white;
+  }
+
+  .text-secondary-content {
+    @apply text-white/60;
+  }
+
+  .text-muted-content {
+    @apply text-white/40;
+  }
+
+  [data-theme="light"] .text-primary-content {
+    @apply text-gray-900;
+  }
+
+  [data-theme="light"] .text-secondary-content {
+    @apply text-gray-500;
+  }
+
+  [data-theme="light"] .text-muted-content {
+    @apply text-gray-400;
+  }
+
+}

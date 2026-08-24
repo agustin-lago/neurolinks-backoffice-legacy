@@ -1,0 +1,241 @@
+/* Shared text buttons. Icon-only, round controls and sidebar buttons keep their
+   view-specific styles. */
+.btn,
+.btn-primary,
+.btn-secondary,
+.btn-outline,
+.btn-cancel,
+.btn-success,
+.btn-danger,
+.qm-save-btn,
+.sw-btn-send,
+.sw-btn-cancel,
+.swal2-styled,
+.modal-footer button:not(.btn-icon):not(.btn-icon-wa):not(.btn-close-modal),
+.modal-action-row button:not(.btn-icon):not(.btn-icon-wa):not(.btn-close-modal),
+.actions button:not(.btn-icon):not(.btn-icon-wa) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-height: 40px;
+  padding: 0.625rem 1rem;
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  font-family: 'Montserrat', sans-serif;
+  font-size: 0.84rem;
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: 0;
+  text-decoration: none;
+  cursor: pointer;
+  user-select: none;
+  color: #cbd5e1;
+  background: rgba(30, 41, 59, 0.78);
+  box-shadow: none;
+  transform-origin: center;
+  transition: transform 0.14s ease;
+}
+
+[data-theme="light"] .btn,
+[data-theme="light"] .btn-secondary,
+[data-theme="light"] .btn-outline,
+[data-theme="light"] .btn-cancel,
+[data-theme="light"] .btn-success,
+[data-theme="light"] .btn-danger,
+[data-theme="light"] .sw-btn-cancel,
+[data-theme="light"] .swal2-cancel,
+[data-theme="light"] .modal-footer button:not(.btn-icon):not(.btn-icon-wa):not(.btn-close-modal),
+[data-theme="light"] .modal-action-row button:not(.btn-icon):not(.btn-icon-wa):not(.btn-close-modal),
+[data-theme="light"] .actions button:not(.btn-icon):not(.btn-icon-wa) {
+  color: #475569;
+  background: #f3f4f6;
+  border-color: #d1d5db;
+}
+
+.btn:hover,
+.btn-primary:hover,
+.btn-secondary:hover,
+.btn-outline:hover,
+.btn-cancel:hover,
+.btn-success:hover,
+.btn-danger:hover,
+.qm-save-btn:hover,
+.sw-btn-send:hover,
+.sw-btn-cancel:hover,
+.swal2-styled:hover,
+.modal-footer button:not(.btn-icon):not(.btn-icon-wa):not(.btn-close-modal):hover,
+.modal-action-row button:not(.btn-icon):not(.btn-icon-wa):not(.btn-close-modal):hover,
+.actions button:not(.btn-icon):not(.btn-icon-wa):hover {
+  transform: scale(0.97);
+}
+
+.btn:active,
+.btn-primary:active,
+.btn-secondary:active,
+.btn-outline:active,
+.btn-cancel:active,
+.btn-success:active,
+.btn-danger:active,
+.qm-save-btn:active,
+.sw-btn-send:active,
+.sw-btn-cancel:active,
+.swal2-styled:active,
+.modal-footer button:not(.btn-icon):not(.btn-icon-wa):not(.btn-close-modal):active,
+.modal-action-row button:not(.btn-icon):not(.btn-icon-wa):not(.btn-close-modal):active,
+.actions button:not(.btn-icon):not(.btn-icon-wa):active {
+  transform: scale(0.94);
+}
+
+.btn:disabled,
+.btn-primary:disabled,
+.btn-secondary:disabled,
+.btn-outline:disabled,
+.btn-cancel:disabled,
+.btn-success:disabled,
+.btn-danger:disabled,
+.qm-save-btn:disabled,
+.sw-btn-send:disabled,
+.sw-btn-cancel:disabled,
+.swal2-styled:disabled,
+.modal-footer button:disabled,
+.modal-action-row button:disabled,
+.actions button:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.btn-primary,
+.qm-save-btn,
+.sw-btn-send,
+.modal-footer .btn-primary,
+.modal-action-row .btn-primary,
+.actions .btn-primary {
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.14);
+  background: linear-gradient(135deg, #0078D4, #0099FF);
+  box-shadow: none;
+}
+
+[data-theme="light"] .btn-primary,
+[data-theme="light"] .modal-footer .btn-primary,
+[data-theme="light"] .modal-action-row .btn-primary,
+[data-theme="light"] .actions .btn-primary {
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.14);
+  background: linear-gradient(135deg, #0078D4, #0099FF);
+  box-shadow: none;
+}
+
+.btn-success,
+.qm-save-btn,
+.swal2-confirm,
+.swal2-styled.swal2-confirm,
+.modal-footer .btn-success,
+.modal-action-row .btn-success,
+.actions .btn-success {
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.14);
+  background: linear-gradient(135deg, #16a34a, #22c55e);
+  box-shadow: none;
+}
+
+[data-theme="light"] .btn-success,
+[data-theme="light"] .swal2-confirm,
+[data-theme="light"] .swal2-styled.swal2-confirm,
+[data-theme="light"] .modal-footer .btn-success,
+[data-theme="light"] .modal-action-row .btn-success,
+[data-theme="light"] .actions .btn-success {
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.14);
+  background: linear-gradient(135deg, #16a34a, #22c55e);
+  box-shadow: none;
+}
+
+.btn-secondary,
+.btn-outline,
+.btn-cancel,
+.sw-btn-cancel,
+.swal2-cancel,
+.swal2-styled.swal2-cancel,
+.modal-footer .btn-secondary,
+.modal-footer .btn-outline,
+.modal-footer .btn-cancel,
+.modal-action-row .btn-secondary,
+.modal-action-row .btn-outline,
+.modal-action-row .btn-cancel,
+.actions .btn-secondary,
+.actions .btn-outline,
+.actions .btn-cancel {
+  color: #cbd5e1;
+  background: rgba(30, 41, 59, 0.78);
+  border-color: rgba(100, 116, 139, 0.36);
+}
+
+[data-theme="light"] .btn-secondary,
+[data-theme="light"] .btn-outline,
+[data-theme="light"] .btn-cancel,
+[data-theme="light"] .sw-btn-cancel,
+[data-theme="light"] .swal2-cancel,
+[data-theme="light"] .swal2-styled.swal2-cancel,
+[data-theme="light"] .modal-footer .btn-secondary,
+[data-theme="light"] .modal-footer .btn-outline,
+[data-theme="light"] .modal-footer .btn-cancel,
+[data-theme="light"] .modal-action-row .btn-secondary,
+[data-theme="light"] .modal-action-row .btn-outline,
+[data-theme="light"] .modal-action-row .btn-cancel,
+[data-theme="light"] .actions .btn-secondary,
+[data-theme="light"] .actions .btn-outline,
+[data-theme="light"] .actions .btn-cancel {
+  color: #475569;
+  background: #f3f4f6;
+  border-color: #d1d5db;
+}
+
+.btn-danger {
+  color: #fecaca;
+  background: rgba(30, 41, 59, 0.78);
+  border-color: rgba(248, 113, 113, 0.28);
+}
+
+[data-theme="light"] .btn-danger {
+  color: #991b1b;
+  background: #f3f4f6;
+  border-color: rgba(185, 28, 28, 0.18);
+}
+
+.btn-sm {
+  min-height: 34px;
+  padding: 0.45rem 0.75rem;
+  border-radius: 8px;
+  font-size: 0.78rem;
+}
+
+.btn-full {
+  width: 100%;
+}
+
+.swal2-actions {
+  gap: 0.75rem;
+}
+
+.swal2-styled:hover {
+  background-image: none !important;
+  box-shadow: none !important;
+}
+
+.swal2-styled.swal2-confirm:hover {
+  color: #fff !important;
+  background: linear-gradient(135deg, #16a34a, #22c55e) !important;
+}
+
+.swal2-styled.swal2-cancel:hover {
+  color: #cbd5e1 !important;
+  background: rgba(30, 41, 59, 0.78) !important;
+}
+
+[data-theme="light"] .swal2-styled.swal2-cancel:hover {
+  color: #475569 !important;
+  background: #f3f4f6 !important;
+}

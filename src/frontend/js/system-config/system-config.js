@@ -1,0 +1,595 @@
+/* global logout, CodeMirror, _csdRebuild, _csdSync */
+
+async function _initSystemConfigPage() {
+    console.log('Unified System Config with 5 Assistant Prompts loaded');
+    
+    // Inicialización de CodeMirror
+    const promptTextarea = document.getElementById('prompt-editor-textarea');
+    let editor = null;
+    
+    if (promptTextarea) {
+        editor = CodeMirror.fromTextArea(promptTextarea, {
+            lineNumbers: true,
+            mode: "markdown",
+            theme: "dracula",
+            lineWrapping: true,
+            scrollbarStyle: "native"
+        });
+        window.cmEditor = editor;
+
+        // --- BUSCADOR DEL PROMPT ---
+        let searchMarks = [];
+        let searchMatches = [];
+        let currentSearchIndex = -1;
+        let currentActiveMark = null;
+
+        const searchInput = document.getElementById('prompt-search-input');
+        const searchCounter = document.getElementById('prompt-search-counter');
+        const searchNav = document.getElementById('prompt-search-nav');
+        const prevBtn = document.getElementById('prompt-search-prev-btn');
+        const nextBtn = document.getElementById('prompt-search-next-btn');
+
+        const clearSearch = () => {
+            searchMarks.forEach(m => m.clear());
+            searchMarks = [];
+            if (currentActiveMark) {
+                currentActiveMark.clear();
+                currentActiveMark = null;
+            }
+            searchMatches = [];
+            currentSearchIndex = -1;
+            if (searchCounter) searchCounter.style.display = 'none';
+            if (searchNav) searchNav.style.display = 'none';
+        }
+
+        const runSearch = () => {
+            clearSearch();
+            const query = searchInput ? searchInput.value : '';
+            if (!query || !editor) return;
+
+            const cursor = editor.getSearchCursor(query, null, { caseFold: true });
+            while (cursor.findNext()) {
+                const from = cursor.from();
+                const to = cursor.to();
+                const mark = editor.markText(from, to, { className: "cm-search-match" });
+                searchMarks.push(mark);
+                searchMatches.push({ from, to });
+            }
+
+            if (searchMatches.length > 0) {
+                if (searchCounter) {
+                    searchCounter.style.display = 'inline';
+                    searchCounter.textContent = `1 / ${searchMatches.length}`;
+                }
+                if (searchNav) searchNav.style.display = 'flex';
+                currentSearchIndex = 0;
+                highlightActiveMatch();
+            } else {
+                if (searchCounter) {
+                    searchCounter.style.display = 'inline';
+                    searchCounter.textContent = `0 / 0`;
+                }
+                if (searchNav) searchNav.style.display = 'none';
+            }
+        }
+
+        const highlightActiveMatch = () => {
+            if (currentActiveMark) {
+                currentActiveMark.clear();
+                currentActiveMark = null;
+            }
+            if (currentSearchIndex < 0 || currentSearchIndex >= searchMatches.length) return;
+
+            const match = searchMatches[currentSearchIndex];
+            editor.scrollIntoView(match.from, 150);
+            currentActiveMark = editor.markText(match.from, match.to, { className: "cm-search-match-active" });
+            
+            if (searchCounter) {
+                searchCounter.textContent = `${currentSearchIndex + 1} / ${searchMatches.length}`;
+            }
+        }
+
+        const nextMatch = () => {
+            if (searchMatches.length === 0) return;
+            currentSearchIndex = (currentSearchIndex + 1) % searchMatches.length;
+            highlightActiveMatch();
+        }
+
+        const prevMatch = () => {
+            if (searchMatches.length === 0) return;
+            currentSearchIndex = (currentSearchIndex - 1 + searchMatches.length) % searchMatches.length;
+            highlightActiveMatch();
+        }
+
+        if (searchInput) {
+            searchInput.addEventListener('input', runSearch);
+            searchInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    if (e.shiftKey) {
+                        prevMatch();
+                    } else {
+                        nextMatch();
+                    }
+                }
+            });
+        }
+
+        if (nextBtn) nextBtn.addEventListener('click', nextMatch);
+        if (prevBtn) prevBtn.addEventListener('click', prevMatch);
+
+        // Limpiar búsqueda al cambiar de pestaña de asistente
+        const assistantSelectEl = document.getElementById('assistant-select');
+        if (assistantSelectEl) {
+            assistantSelectEl.addEventListener('change', () => {
+                if (searchInput) searchInput.value = '';
+                clearSearch();
+            });
+        }
+    }
+
+    const variablesForm = document.getElementById('variables-form');
+    const updateBtn = document.getElementById('update-btn');
+    const assistantSelect = document.getElementById('assistant-select');
+    let initialVariables = {};
+
+    const getSafeToken = () => localStorage.getItem('system_config_token') || localStorage.getItem('backoffice_token') || '';
+
+    // Cargar modelos de OpenAI desde la API
+    async function loadOpenAIModels() {
+        const select = document.getElementById('OPENAI_MODEL');
+        if (!select) return;
+        const token = getSafeToken();
+        try {
+            const response = await fetch(`/api/backoffice/openai/models?token=${token}`);
+            const data = await response.json();
+            if (data.success && Array.isArray(data.models)) {
+                select.innerHTML = '';
+                data.models.forEach(model => {
+                    const opt = document.createElement('option');
+                    opt.value = model;
+                    
+                    // Formato descriptivo amigable para modelos comunes
+                    let text = model;
+                    if (model === 'gpt-4o') text = 'GPT-4o (Recomendado - Premium)';
+                    else if (model === 'gpt-4o-mini') text = 'GPT-4o Mini (Recomendado - Económico)';
+                    else if (model === 'o1-mini') text = 'o1 Mini (Razonamiento Lógico)';
+                    else if (model === 'o3-mini') text = 'o3 Mini (Razonamiento Rápido)';
+                    
+                    opt.text = text;
+                    select.appendChild(opt);
+                });
+                
+                // Reconstruir la interfaz de CSD (Custom Select Dropdown)
+                if (typeof _csdRebuild === 'function') _csdRebuild('OPENAI_MODEL');
+            }
+        } catch (err) {
+            console.error('Error fetching OpenAI models:', err);
+        }
+    }
+
+    // Cargar variables actuales
+    async function loadVariables() {
+        const token = getSafeToken();
+        try {
+            const response = await fetch(`/api/backoffice/config?token=${token}`);
+            if (response.status === 401) return logout();
+            const data = await response.json();
+            
+            if (data.success && data.variables) {
+                initialVariables = data.variables;
+                Object.keys(initialVariables).forEach(key => {
+                    // Mapeo especial para prompts
+                    let elementId = key;
+                    if (key === 'ASSISTANT_PROMPT') elementId = 'ASSISTANT_PROMPT_VAL';
+                    else if (key.startsWith('ASSISTANT_PROMPT_')) elementId = key + '_VAL';
+
+                    const input = document.getElementById(elementId) || document.getElementsByName(key)[0];
+                    if (input) {
+                        if (input.tagName === 'SELECT') {
+                            const val = String(initialVariables[key] || '');
+                            if (key === 'ID_GRUPO_RESUMEN' || key === 'ID_GRUPO_RESUMEN_2') {
+                                input.innerHTML = '';
+                                const opt = document.createElement('option');
+                                opt.value = val;
+                                opt.text = val ? val : 'Sin asignar / Sin grupo';
+                                opt.selected = true;
+                                input.appendChild(opt);
+                            }
+                            input.value = val;
+                            if (typeof _csdRebuild === 'function') _csdRebuild(key);
+                            if (typeof _csdSync === 'function') _csdSync(key);
+                        } else {
+                            input.value = initialVariables[key];
+                            const cb = input.parentElement?.querySelector('.switch input[type="checkbox"]');
+                            if (cb) cb.checked = String(initialVariables[key]) === 'true';
+                        }
+                    }
+                });
+
+                // Cargar el prompt inicial en el editor
+                loadEditorFromHidden();
+            }
+        } catch (err) {
+            console.error('Error fetching variables:', err);
+        }
+    }
+
+    function loadEditorFromHidden() {
+        const index = assistantSelect.value;
+        const hiddenId = index === '1' ? 'ASSISTANT_PROMPT_VAL' : `ASSISTANT_PROMPT_${index}_VAL`;
+        const hiddenInput = document.getElementById(hiddenId);
+        if (hiddenInput && editor) {
+            editor.setValue(hiddenInput.value || '');
+        }
+    }
+
+    // Al cambiar el asistente en el select del panel
+    assistantSelect.addEventListener('change', () => {
+        loadEditorFromHidden();
+    });
+
+    // Cada vez que el editor cambie, actualizamos el input oculto correspondiente
+    if (editor) {
+        editor.on('change', () => {
+            const index = assistantSelect.value;
+            const hiddenId = index === '1' ? 'ASSISTANT_PROMPT_VAL' : `ASSISTANT_PROMPT_${index}_VAL`;
+            const hiddenInput = document.getElementById(hiddenId);
+            if (hiddenInput) {
+                hiddenInput.value = editor.getValue();
+            }
+        });
+    }
+
+    function updateClientSlugVisibility() {
+        const clientSlugSel = document.getElementById('CLIENT_SLUG');
+        const aquavitaContainer = document.getElementById('aquavita-credentials-container');
+        const ganemosNetContainer = document.getElementById('ganemos-net-credentials-container');
+        const casEpcContainer = document.getElementById('cas-epc-credentials-container');
+        if (!clientSlugSel) return;
+        
+        const val = clientSlugSel.value;
+        if (aquavitaContainer) {
+            aquavitaContainer.style.display = val === 'aquavita' ? 'grid' : 'none';
+        }
+        if (ganemosNetContainer) {
+            ganemosNetContainer.style.display = val === 'ganemos-net' ? 'grid' : 'none';
+        }
+        if (casEpcContainer) {
+            casEpcContainer.style.display = val === 'cas-epc' ? 'grid' : 'none';
+        }
+    }
+
+    const clientSlugSel = document.getElementById('CLIENT_SLUG');
+    if (clientSlugSel) {
+        clientSlugSel.addEventListener('change', updateClientSlugVisibility);
+    }
+
+    await loadOpenAIModels();
+    await loadVariables();
+    updateClientSlugVisibility();
+
+    // Lógica del Panel Lateral
+    window.togglePromptPanel = () => {
+        const panel = document.getElementById('prompt-panel');
+        const overlay = document.getElementById('panel-overlay');
+        const isActive = panel.classList.toggle('active');
+        overlay.classList.toggle('active');
+
+        if (isActive && editor) {
+            setTimeout(() => {
+                editor.refresh();
+                editor.focus();
+            }, 300);
+        }
+    };
+
+    // Lógica para mostrar/ocultar contraseñas
+    document.querySelectorAll('.toggle-password').forEach(button => {
+        button.addEventListener('click', () => {
+            const wrapper = button.closest('.input-wrapper');
+            const input = wrapper.querySelector('input, textarea');
+            const type = input.getAttribute('type') === 'password' ? 'text' : 'password';
+            input.setAttribute('type', type);
+            button.textContent = button.textContent === '👁️' ? '🙈' : '👁️';
+        });
+    });
+
+    document.getElementById('cancel-btn').addEventListener('click', () => {
+        if (typeof window.navigate === 'function') window.navigate('/dashboard');
+        else window.location.href = '/dashboard';
+    });
+
+    // Manejo del formulario UNIFICADO (Bulk Save)
+    variablesForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        
+        const formData = new FormData(variablesForm);
+        const settingsToSave = {};
+        let hasChanges = false;
+        
+        formData.forEach((value, key) => {
+            // Solo guardamos si es diferente al inicial
+            if (String(value) !== String(initialVariables[key] || '')) {
+                settingsToSave[key] = value;
+                hasChanges = true;
+            }
+        });
+
+        // ─── PARCHE: Campos de credenciales (los browsers omiten type="password" en FormData) ───
+        // Capturamos ADMIN_USER y ADMIN_PASS directamente del DOM.
+        const credentialFields = ['ADMIN_USER', 'ADMIN_PASS', 'GANAMOSNET_WEBSHARE_API_KEY', 'GANAMOSNET_PROXY_URL'];
+        credentialFields.forEach(key => {
+            const el = document.getElementById(key);
+            if (!el) return;
+            const val = el.value.trim();
+            // Si el usuario escribió algo, siempre guardar (ignorar guard de comparación)
+            if (val !== '') {
+                settingsToSave[key] = val;
+                hasChanges = true;
+            }
+        });
+        // ─────────────────────────────────────────────────────────────────────────────────────────
+
+        if (!hasChanges) {
+            window.swalAlert('Info', 'No se detectaron cambios para guardar.', 'info');
+            return;
+        }
+
+        updateBtn.disabled = true;
+        updateBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Guardando...';
+        
+        try {
+            const token = getSafeToken();
+            const response = await fetch(`/api/backoffice/save-settings-bulk?token=${token}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ settings: settingsToSave })
+            });
+
+            if (response.status === 401) return logout();
+            const data = await response.json();
+
+            if (data.success) {
+                window.swalAlert('Éxito', 'Configuración guardada correctamente.', 'success');
+                Object.assign(initialVariables, settingsToSave);
+                // Limpiar los campos de credenciales tras guardar para evitar re-guardado involuntario
+                credentialFields.forEach(key => {
+                    const el = document.getElementById(key);
+                    if (el && settingsToSave[key] !== undefined) el.value = '';
+                });
+                
+                // Sincronizar prompts cambiados con OpenAI si corresponde
+                for (let i = 1; i <= 5; i++) {
+                    const key = i === 1 ? 'ASSISTANT_PROMPT' : `ASSISTANT_PROMPT_${i}`;
+                    if (settingsToSave[key]) {
+                        await syncPromptWithOpenAI(settingsToSave[key], String(i));
+                    }
+                }
+            } else {
+                window.swalAlert('Error', data.error || 'Error desconocido', 'error');
+            }
+        } catch (err) {
+            console.error('Error saving settings:', err);
+            window.swalAlert('Error', 'Error de conexión al guardar.', 'error');
+        } finally {
+            updateBtn.disabled = false;
+            updateBtn.innerHTML = '<i class="fas fa-save" style="margin-right:8px;"></i> Guardar (Sin reiniciar)';
+        }
+    });
+
+    // ─── GUARDAR CREDENCIALES (ADMIN_USER / ADMIN_PASS) ───────────────────
+    // Handler independiente: los campos son type="text" (no password) para garantizar
+    // que el browser no los omita. Se leen directo del DOM, sin FormData.
+    const saveCredsBtn = document.getElementById('save-credentials-btn');
+    if (saveCredsBtn) {
+        saveCredsBtn.addEventListener('click', async () => {
+            const userEl = document.getElementById('ADMIN_USER');
+            const passEl = document.getElementById('ADMIN_PASS');
+            const statusEl = document.getElementById('credentials-status');
+
+            const adminUser = (userEl?.value || '').trim();
+            const adminPass = (passEl?.value || '').trim();
+
+            if (!adminUser && !adminPass) {
+                if (statusEl) { statusEl.textContent = '⚠️ Completá al menos un campo.'; statusEl.style.color = '#f59e0b'; }
+                return;
+            }
+
+            const settingsToSave = {};
+            if (adminUser) settingsToSave['ADMIN_USER'] = adminUser;
+            if (adminPass) settingsToSave['ADMIN_PASS'] = adminPass;
+
+            saveCredsBtn.disabled = true;
+            saveCredsBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Guardando...';
+
+            try {
+                const token = getSafeToken();
+                const response = await fetch(`/api/backoffice/save-settings-bulk?token=${token}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ settings: settingsToSave })
+                });
+                if (response.status === 401) return logout();
+                const data = await response.json();
+                if (data.success) {
+                    if (statusEl) { statusEl.textContent = '✅ Credenciales guardadas correctamente.'; statusEl.style.color = '#10b981'; }
+                    if (userEl) userEl.value = '';
+                    if (passEl) passEl.value = '';
+                } else {
+                    if (statusEl) { statusEl.textContent = '❌ Error: ' + (data.error || 'desconocido'); statusEl.style.color = '#ef4444'; }
+                }
+            } catch (err) {
+                console.error('Error saving credentials:', err);
+                if (statusEl) { statusEl.textContent = '❌ Error de conexión.'; statusEl.style.color = '#ef4444'; }
+            } finally {
+                saveCredsBtn.disabled = false;
+                saveCredsBtn.innerHTML = '<i class="fas fa-key"></i> Guardar Credenciales';
+            }
+        });
+    }
+    // ──────────────────────────────────────────────────────────────────────
+
+    async function syncPromptWithOpenAI(prompt, index) {
+        try {
+            const token = getSafeToken();
+            await fetch(`/api/backoffice/update-prompt?token=${token}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ prompt, index })
+            });
+        } catch (e) {
+            console.error(`Error syncing prompt ${index} with OpenAI:`, e);
+        }
+    }
+
+    // --- Sincronizar Prompt desde OpenAI (Botón Individual) ---
+    const syncBtn = document.getElementById('sync-prompt-btn');
+    const syncStatus = document.getElementById('sync-status');
+
+    syncBtn.addEventListener('click', async () => {
+        const index = assistantSelect.value;
+        const envKey = index === '1' ? 'ASSISTANT_ID' : `ASSISTANT_${index}`;
+        const assistantIdInput = document.getElementById(envKey);
+        const assistantId = assistantIdInput ? assistantIdInput.value : '';
+
+        if (!assistantId) {
+            window.swalAlert('Atención', `Debes ingresar un ID para el Asistente ${index} para sincronizar.`, 'warning');
+            return;
+        }
+
+        syncBtn.disabled = true;
+        syncStatus.textContent = '⏳ Sincronizando...';
+
+        try {
+            const token = getSafeToken();
+            const response = await fetch(`/api/backoffice/sync-assistant-prompt?token=${token}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ assistantId })
+            });
+
+            const data = await response.json();
+            if (data.success) {
+                if (editor) editor.setValue(data.instructions);
+                syncStatus.textContent = '✅ Sincronizado.';
+                syncStatus.style.color = '#10b981';
+            } else {
+                window.swalAlert('Error', data.error, 'error');
+            }
+        } catch (err) {
+            console.error('Error syncing prompt:', err);
+        } finally {
+            syncBtn.disabled = false;
+        }
+    });
+
+    // Guardar Prompt individualmente
+    const hotSaveBtn = document.getElementById('save-prompt-hot-btn');
+    hotSaveBtn.addEventListener('click', async () => {
+        const prompt = editor.getValue();
+        const index = assistantSelect.value;
+        hotSaveBtn.disabled = true;
+        syncStatus.textContent = `⏳ Guardando...`;
+
+        try {
+            const token = getSafeToken();
+            const settingKey = index === '1' ? 'ASSISTANT_PROMPT' : `ASSISTANT_PROMPT_${index}`;
+            
+            const response = await fetch(`/api/backoffice/save-settings-bulk?token=${token}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ settings: { [settingKey]: prompt } })
+            });
+
+            const data = await response.json();
+            if (data.success) {
+                await syncPromptWithOpenAI(prompt, index);
+                syncStatus.textContent = `✅ Guardado.`;
+                syncStatus.style.color = '#10b981';
+                initialVariables[settingKey] = prompt;
+            } else {
+                window.swalAlert('Error', data.error, 'error');
+            }
+        } catch (err) {
+            console.error('Error saving prompt:', err);
+        } finally {
+            hotSaveBtn.disabled = false;
+        }
+    });
+
+    // --- Cargar Grupos de WhatsApp ---
+    const btnLoadGroups = document.getElementById('btn-load-groups');
+    const loadGroupsSpinner = document.getElementById('load-groups-spinner');
+    const btnLoadGroupsText = document.getElementById('btn-load-groups-text');
+
+    if (btnLoadGroups) {
+        btnLoadGroups.addEventListener('click', async () => {
+            btnLoadGroups.disabled = true;
+            if (loadGroupsSpinner) loadGroupsSpinner.style.display = 'inline-block';
+            if (btnLoadGroupsText) btnLoadGroupsText.textContent = 'Buscando grupos...';
+
+            try {
+                const token = getSafeToken();
+                const response = await fetch(`/api/backoffice/whatsapp/groups?token=${token}`);
+                const data = await response.json();
+
+                if (data.success && Array.isArray(data.groups)) {
+                    const select1 = document.getElementById('ID_GRUPO_RESUMEN');
+                    const select2 = document.getElementById('ID_GRUPO_RESUMEN_2');
+                    
+                    const val1 = select1 ? select1.value : '';
+                    const val2 = select2 ? select2.value : '';
+
+                    const optionsHtml = ['<option value="">Sin asignar / Sin grupo</option>']
+                        .concat(data.groups.map(g => `<option value="${g.id}">${g.name} (${g.id})</option>`))
+                        .join('');
+
+                    if (select1) {
+                        select1.innerHTML = optionsHtml;
+                        select1.value = val1;
+                        if (val1 && select1.value !== val1) {
+                            const opt = document.createElement('option');
+                            opt.value = val1;
+                            opt.text = `${val1} (Grupo guardado anterior)`;
+                            opt.selected = true;
+                            select1.appendChild(opt);
+                            select1.value = val1;
+                        }
+                        if (typeof _csdRebuild === 'function') _csdRebuild('ID_GRUPO_RESUMEN');
+                        if (typeof _csdSync === 'function') _csdSync('ID_GRUPO_RESUMEN');
+                    }
+
+                    if (select2) {
+                        select2.innerHTML = optionsHtml;
+                        select2.value = val2;
+                        if (val2 && select2.value !== val2) {
+                            const opt = document.createElement('option');
+                            opt.value = val2;
+                            opt.text = `${val2} (Grupo guardado anterior)`;
+                            opt.selected = true;
+                            select2.appendChild(opt);
+                            select2.value = val2;
+                        }
+                        if (typeof _csdRebuild === 'function') _csdRebuild('ID_GRUPO_RESUMEN_2');
+                        if (typeof _csdSync === 'function') _csdSync('ID_GRUPO_RESUMEN_2');
+                    }
+
+                    window.swalAlert('Éxito', `Se cargaron ${data.groups.length} grupos de WhatsApp correctamente.`, 'success');
+                } else {
+                    window.swalAlert('Error al cargar grupos', data.error || 'Asegúrate de que el bot esté conectado por QR.', 'error');
+                }
+            } catch (err) {
+                console.error('Error loading WhatsApp groups:', err);
+                window.swalAlert('Error de conexión', 'No se pudieron obtener los grupos.', 'error');
+            } finally {
+                btnLoadGroups.disabled = false;
+                if (loadGroupsSpinner) loadGroupsSpinner.style.display = 'none';
+                if (btnLoadGroupsText) btnLoadGroupsText.textContent = 'Cargar Grupos de WhatsApp de la Línea';
+            }
+        });
+    }
+}
+
+document.addEventListener('DOMContentLoaded', _initSystemConfigPage);
+window.initSystemConfigView = _initSystemConfigPage;

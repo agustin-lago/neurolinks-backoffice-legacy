@@ -1,0 +1,44 @@
+/* Consolidated theme and backoffice chat rules. Keep these in the Tailwind
+   source so the app only loads the generated tailwind.css bundle. */
+.bg-page {
+  background: linear-gradient(160deg, #071827 0%, #0A2036 35%, #0E2D49 65%, #123C60 100%);
+}
+
+[data-theme="light"] .bg-page {
+  background: linear-gradient(160deg, #f0f4f8 0%, #e8edf4 35%, #dde5f0 65%, #d4dff0 100%);
+}
+
+[data-theme="dark"] body {
+  background: #071827;
+}
+
+[data-theme="light"] body {
+  background: #f0f4f8;
+}
+
+.badge,
+.column-badge,
+.platform-tab.active {
+  background: linear-gradient(135deg, #0078D4, #0099FF);
+}
+
+.nav-brand-avatar,
+.chat-avatar {
+  background: linear-gradient(135deg, #0078D4, #0099FF);
+}
+
+[data-theme="light"] .nav-brand-avatar {
+  background: linear-gradient(135deg, #2563EB, #0099FF);
+}
+
+.section-divider {
+  background: linear-gradient(90deg, transparent, rgba(0, 153, 255, 0.12), transparent);
+}
+
+.phone-wa-btn {
+  background: linear-gradient(135deg, #25D366, #1da851);
+}
+
+.meta-library-badge {
+  background: linear-gradient(135deg, #0668E1, #00F2FE);
+}

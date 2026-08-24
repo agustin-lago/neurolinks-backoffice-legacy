@@ -1,0 +1,109 @@
+import { addKeyword, EVENTS } from "@builderbot/bot";
+import { reset } from "../timeOut";
+import { userQueues, userLocks, handleQueue } from "../queueManager";
+import * as fs from 'fs';
+
+// El timeout se calcula dinámicamente dentro de la acción
+
+const welcomeFlowVideo = addKeyword(EVENTS.MEDIA).addAction(
+  async (ctx, { flowDynamic, provider, gotoFlow, state }) => {
+    const userId = ctx.from;
+
+    // Verificar si es un video
+    const mimetype = ctx?.media?.mimetype || ctx?.message?.videoMessage?.mimetype || "";
+    if (!mimetype.includes('video')) {
+        return; // No es un video, ignorar y dejar que otro flujo lo maneje si es posible
+    }
+
+    // Filtrar contactos ignorados
+    if (
+      /@broadcast$/.test(userId) ||
+      /@newsletter$/.test(userId) ||
+      /@channel$/.test(userId)
+    ) {
+      console.log(`Mensaje de video ignorado por filtro de contacto: ${userId}`);
+      return;
+    }
+
+    const { HistoryHandler } = await import("../../db/historyHandler");
+    const botPhoneNumber = provider?.globalVendorArgs?.phone_number_id || (ctx.to ? ctx.to.replace(/\D/g, '') : null);
+    const dynamicProjectId = await HistoryHandler.getProjectIdByRecipient(botPhoneNumber) || HistoryHandler.PROJECT_IDENTIFIER;
+    const dynamicServiceId = await HistoryHandler.getServiceIdByRecipient(botPhoneNumber) || HistoryHandler.SERVICE_IDENTIFIER;
+    const timeoutCierreValue = await HistoryHandler.getConfig('timeOutCierre', dynamicProjectId, dynamicServiceId) || 45;
+    const setTime = Number(timeoutCierreValue) * 60 * 1000;
+    reset(ctx, gotoFlow, setTime);
+
+    // Asegurar que userQueues tenga un array inicializado para este usuario
+    if (!userQueues.has(userId)) {
+      userQueues.set(userId, []);
+    }
+
+    try {
+      if (!provider) {
+        await flowDynamic("No se encontró el provider para descargar el video.");
+        return;
+      }
+      
+      // Asegurar que la carpeta tmp exista
+      if (!fs.existsSync("./tmp/")) {
+        fs.mkdirSync("./tmp/", { recursive: true });
+      }
+      
+      const localPath = await provider.saveFile(ctx, { path: "./tmp/" });
+      if (!localPath) {
+        await flowDynamic("No se pudo guardar el video recibido.");
+        return;
+      }
+
+      // Eliminar video anterior si existe
+      const oldVideo = state.get('lastVideo');
+      if (oldVideo && typeof oldVideo === 'string' && fs.existsSync(oldVideo)) {
+        try {
+          fs.unlinkSync(oldVideo);
+          console.log(`🗑️ Video anterior eliminado: ${oldVideo}`);
+        } catch (e) {
+          console.error(`❌ Error eliminando video anterior: ${oldVideo}`, e);
+        }
+      }
+
+      await state.update({ lastVideo: localPath });
+
+      // Informar al asistente principal
+      const caption = (ctx.body && !ctx.body.includes('_event_')) ? ctx.body : (ctx.payload?.message?.videoMessage?.caption || ctx.payload?.video?.caption || '');
+      ctx.body = `[Video recibido]${caption ? ': ' + caption : ''}. (El usuario envió un video que ha sido guardado)`;
+
+      // Guardar en la base de datos para que el asistente tenga el historial en siguientes turnos
+      try {
+        await HistoryHandler.saveMessage(
+          userId,
+          'user',
+          `📹 Video recibido: (El usuario envió un video que ha sido guardado en el sistema)${caption ? ' con subtítulo: "' + caption + '"' : ''}`,
+          'text',
+          null,
+          ctx.userId,
+          null,
+          ctx.platform || 'whatsapp',
+          dynamicProjectId,
+          dynamicServiceId
+        );
+      } catch (dbErr) {
+        console.error("❌ Error guardando log de video en base de datos:", dbErr);
+      }
+
+      if (!userQueues.has(userId)) {
+        userQueues.set(userId, []);
+      }
+      userQueues.get(userId).push({ ctx, flowDynamic, state, provider, gotoFlow });
+      if (!userLocks.get(userId) && userQueues.get(userId).length === 1) {
+        await handleQueue(userId);
+      }
+      
+      console.log(`💾 Video guardado: ${localPath}`);
+    } catch (err) {
+      console.error("Error procesando video:", err);
+      await flowDynamic("Ocurrió un error al procesar el video. Intenta más tarde.");
+    }
+  }
+);
+
+export { welcomeFlowVideo };

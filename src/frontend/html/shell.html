@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="es" data-theme="light" style="height: 100dvh; width: 100%; overflow: hidden;">
+
+<head>
+    <script>document.documentElement.setAttribute('data-theme', localStorage.getItem('theme') || 'light');</script>
+    <script src="/js/auth/auth-check.js"></script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Backoffice - Neurolinks</title>
+    <link rel="icon" href="/assets/favicon.ico?v={{ASSET_VERSION}}" sizes="any">
+    <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32x32.png?v={{ASSET_VERSION}}">
+    <link rel="icon" type="image/png" sizes="16x16" href="/assets/favicon-16x16.png?v={{ASSET_VERSION}}">
+    <link rel="apple-touch-icon" sizes="180x180" href="/assets/apple-touch-icon.png?v={{ASSET_VERSION}}">
+    <link rel="manifest" href="/assets/site.webmanifest?v={{ASSET_VERSION}}">
+    <link rel="stylesheet" href="/style/vendor/fontawesome/css/all.min.css">
+    <link rel="stylesheet" href="/style/tailwind.css">
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+    <script>
+        window.Swal = window.Swal.mixin({
+            scrollbarPadding: false,
+            heightAuto: false
+        });
+
+        window.swalConfirm = async function (title, text) {
+            if (typeof Swal !== 'undefined') {
+                const res = await Swal.fire({
+                    title: title || 'Confirmación',
+                    text: text || '¿Estás seguro de continuar?',
+                    icon: 'warning',
+                    showCancelButton: true,
+                    confirmButtonColor: '#0099FF',
+                    cancelButtonColor: '#6b7280',
+                    confirmButtonText: 'Sí, continuar',
+                    cancelButtonText: 'Cancelar'
+                });
+                return res.isConfirmed;
+            }
+            return confirm(text || title);
+        };
+        window.swalAlert = function (title, text, icon) {
+            if (typeof Swal !== 'undefined') {
+                return Swal.fire({
+                    title: title || 'Atención',
+                    text: text || '',
+                    icon: icon || 'info',
+                    confirmButtonColor: '#0099FF'
+                });
+            }
+            alert(text || title);
+        };
+    </script>
+    <script src="/js/core/toast.js"></script>
+    <script src="/js/utils/skeleton.js"></script>
+    <script>
+        window.BOT_NAME = '{{BOT_NAME}}';
+        window.__IS_SUPERADMIN_SESSION = localStorage.getItem('is_superadmin') === 'true';
+        window.__BACKOFFICE_VISIBLE = '{{SHOW_BACKOFFICE_STYLE}}' !== 'hidden-item';
+        window.__CRM_VISIBLE = '{{SHOW_CRM_STYLE}}' !== 'hidden-item';
+        window.railwayProjectId = '{{PROJECT_ID}}';
+        window.railwayServiceId = '{{SERVICE_ID}}';
+        (function() {
+            const originalFetch = window.fetch;
+            window.fetch = function(input, init) {
+                if (window.railwayProjectId || window.railwayServiceId) {
+                    if (typeof input === 'string') {
+                        if (input.includes('/api/')) {
+                            try {
+                                const urlObj = new URL(input, window.location.origin);
+                                if (window.railwayProjectId && !urlObj.searchParams.has('projectId')) {
+                                    urlObj.searchParams.set('projectId', window.railwayProjectId);
+                                }
+                                if (window.railwayServiceId && !urlObj.searchParams.has('serviceId')) {
+                                    urlObj.searchParams.set('serviceId', window.railwayServiceId);
+                                }
+                                input = urlObj.pathname + urlObj.search + urlObj.hash;
+                            } catch (e) {}
+                        }
+                    }
+                    if (init && init.headers) {
+                        if (Array.isArray(init.headers)) {
+                            if (window.railwayProjectId && !init.headers.some(h => h[0].toLowerCase() === 'x-project-id')) {
+                                init.headers.push(['x-project-id', window.railwayProjectId]);
+                            }
+                            if (window.railwayServiceId && !init.headers.some(h => h[0].toLowerCase() === 'x-service-id')) {
+                                init.headers.push(['x-service-id', window.railwayServiceId]);
+                            }
+                        } else if (typeof init.headers === 'object' && !(init.headers instanceof Headers)) {
+                            if (window.railwayProjectId && !init.headers['x-project-id'] && !init.headers['X-Project-Id']) {
+                                init.headers['x-project-id'] = window.railwayProjectId;
+                            }
+                            if (window.railwayServiceId && !init.headers['x-service-id'] && !init.headers['X-Service-Id']) {
+                                init.headers['x-service-id'] = window.railwayServiceId;
+                            }
+                        }
+                    }
+                }
+                return originalFetch.call(this, input, init);
+            };
+        })();
+        (function() {
+            const originalIo = window.io;
+            if (typeof originalIo === 'function') {
+                window.io = function(url, options) {
+                    let opts = options || {};
+                    if (typeof url === 'object' && url !== null) {
+                        opts = url;
+                        url = undefined;
+                    }
+                    if (!opts.query) opts.query = {};
+                    if (window.railwayProjectId && !opts.query.projectId) {
+                        opts.query.projectId = window.railwayProjectId;
+                    }
+                    if (window.railwayServiceId && !opts.query.serviceId) {
+                        opts.query.serviceId = window.railwayServiceId;
+                    }
+                    return originalIo(url, opts);
+                };
+            }
+        })();
+    </script>
+</head>
+
+<body class="flex h-screen overflow-hidden font-body" style="height: 100dvh;">
+
+    <!-- Fondo -->
+    <div class="bg-page"></div>
+
+    <canvas id="neural-bg" aria-hidden="true" class="fixed inset-0 w-full h-full pointer-events-none"
+        style="z-index:0; opacity:0.18;"></canvas>
+
+    <header class="mobile-appbar no-print" aria-label="Acciones principales">
+        <button type="button" id="mobile-sidemenu-toggle" class="mobile-sidemenu-toggle" onclick="toggleMobileSideMenu(event)" aria-label="Abrir menu" aria-controls="sidemenu" aria-expanded="false">
+            <i class="fas fa-bars"></i>
+        </button>
+        <div class="mobile-appbar-actions">
+            <button type="button" class="mobile-appbar-action" onclick="openNotificationsModal(event)" aria-label="Notificaciones">
+                <i class="fas fa-bell"></i>
+                <span class="unread-badge mobile-appbar-badge" data-notifications-badge style="display:none;">0</span>
+            </button>
+            <button type="button" class="mobile-appbar-action" onclick="openSupportWidget(event)" aria-label="Soporte">
+                <i class="fas fa-headset"></i>
+                <span class="unread-badge mobile-appbar-badge" data-support-badge style="display:none;">0</span>
+            </button>
+            <button type="button" class="mobile-appbar-avatar" id="mobile-account-trigger" onclick="toggleMobileAccountMenu(event)" aria-label="Menu de cuenta" aria-expanded="false">
+                <span id="mobile-user-avatar" data-project-name="{{PROJECT_NAME}}">{{PROJECT_NAME}}</span>
+            </button>
+        </div>
+        <div class="desktop-account-menu mobile-account-menu" id="mobile-account-menu" role="menu" aria-label="Menu de cuenta">
+            <div class="desktop-account-menu-detail" aria-label="Detalle de cuenta">
+                <span class="desktop-account-detail-avatar" id="mobile-account-detail-avatar">U</span>
+                <div class="desktop-account-menu-detail-body">
+                    <strong id="mobile-account-detail-project">{{BOT_NAME}}</strong>
+                    <span id="mobile-account-detail-name">Usuario</span>
+                    <div class="desktop-account-menu-detail-row">
+                        <span id="mobile-account-detail-email"></span>
+                        <span class="desktop-account-plan-badge" id="mobile-account-detail-plan">Sin plan</span>
+                    </div>
+                </div>
+            </div>
+            <div class="desktop-account-identifiers" id="mobile-account-identifiers" hidden>
+                <button type="button" class="desktop-account-id-copy" id="mobile-account-project-id-copy" data-copy-label="Project ID" onclick="copyAccountIdentifier(event)">
+                    <span class="desktop-account-id-label">Project ID</span>
+                    <span class="desktop-account-id-value" id="mobile-account-project-id">-</span>
+                    <i class="fas fa-copy"></i>
+                </button>
+                <button type="button" class="desktop-account-id-copy" id="mobile-account-service-id-copy" data-copy-label="Service ID" onclick="copyAccountIdentifier(event)">
+                    <span class="desktop-account-id-label">Service ID</span>
+                    <span class="desktop-account-id-value" id="mobile-account-service-id">-</span>
+                    <i class="fas fa-copy"></i>
+                </button>
+            </div>
+            <div class="desktop-account-menu-divider" role="separator"></div>
+            <button type="button" class="desktop-account-menu-item" role="menuitem" onclick="toggleTheme()">
+                <i id="mobile-theme-icon" class="fas fa-sun"></i>
+                <span id="mobile-theme-label">Tema: Claro</span>
+            </button>
+            <button type="button" class="desktop-account-menu-item" role="menuitem" onclick="navigateFromDesktopAccount('/usuarios')">
+                <i class="fas fa-user-plus"></i>
+                <span>Nuevo usuario</span>
+            </button>
+            <button type="button" class="desktop-account-menu-item" id="mobile-system-config-account-item" role="menuitem" onclick="navigateFromDesktopAccount('/system-config')" style="display:none;">
+                <i class="fas fa-gears"></i>
+                <span>Configuracion</span>
+            </button>
+            <button type="button" class="desktop-account-menu-item desktop-account-menu-item-danger" role="menuitem" onclick="logout()">
+                <i class="fas fa-power-off"></i>
+                <span>Cerrar sesion</span>
+            </button>
+        </div>
+    </header>
+    <button type="button" id="mobile-sidemenu-overlay" class="mobile-sidemenu-overlay no-print" onclick="closeMobileSideMenu(event)" aria-label="Cerrar menu"></button>
+
+    <aside id="sidemenu" class="app-sidemenu no-print" aria-label="Menu principal">
+        <button type="button" class="mobile-sidemenu-close" onclick="closeMobileSideMenu(event)" aria-label="Cerrar menu">
+            <i class="fas fa-times"></i>
+        </button>
+        <div class="app-sidemenu-content p-4">
+            <div class="app-sidemenu-logo">
+                <span class="app-sidemenu-logo-mark"><i class="fas fa-brain"></i></span>
+                <span class="app-sidemenu-logo-text">
+                    <strong>Neurolinks</strong>
+                    <span>Backoffice - v{{APP_VERSION}}</span>
+                </span>
+            </div>
+
+            <div class="app-sidemenu-line">
+                <div class="desktop-line-selector" id="desktop-line-selector">
+                    <button type="button" class="desktop-line-selector-btn is-loading" id="desktop-line-selector-btn" onclick="toggleDesktopLineMenu(event)" aria-label="Linea vinculada" aria-expanded="false">
+                        <i class="fab fa-whatsapp"></i>
+                        <span id="desktop-line-selector-label" class="desktop-line-selector-label">Cargando linea</span>
+                        <i class="fas fa-chevron-down desktop-line-selector-chevron"></i>
+                    </button>
+                    <div class="desktop-line-menu" id="desktop-line-menu" role="menu" aria-label="Lineas vinculadas">
+                        <div class="desktop-line-menu-status" id="desktop-line-menu-status">
+                            <span class="desktop-line-menu-empty">Cargando linea...</span>
+                        </div>
+                        <button type="button" class="desktop-line-menu-item" role="menuitem" onclick="showAddLineSoon(event)">
+                            <i class="fas fa-plus"></i>
+                            <span>Agregar linea</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <ul id="sidemenu-list" class="app-sidemenu-list mt-4 space-y-1"></ul>
+        </div>
+
+        <div class="app-sidemenu-footer">
+            <button type="button" class="app-sidemenu-profile" id="desktop-account-trigger" onclick="toggleDesktopAccountMenu(event)" aria-label="Menu de cuenta" aria-expanded="false">
+                <div style="position:relative; display:inline-flex;">
+                    <span class="app-sidemenu-avatar" id="sidemenu-project-avatar" data-project-name="{{PROJECT_NAME}}">{{PROJECT_NAME}}</span>
+                    <span id="sidebar-global-dot" class="app-sidemenu-avatar-dot" style="display:none;"></span>
+                </div>
+                <span class="app-sidemenu-profile-text">
+                    <strong>{{BOT_NAME}}</strong>
+                    <span id="sidemenu-user-email"></span>
+                </span>
+                <span class="app-sidemenu-profile-indicators" aria-hidden="true">
+                    <span class="app-sidemenu-profile-indicator">
+                        <i class="fas fa-bell"></i>
+                        <span class="app-sidemenu-icon-dot" data-notifications-dot style="display:none;"></span>
+                    </span>
+                    <span class="app-sidemenu-profile-indicator">
+                        <i class="fas fa-headset"></i>
+                        <span class="app-sidemenu-icon-dot" data-support-dot style="display:none;"></span>
+                    </span>
+                </span>
+                <i class="fas fa-chevron-right app-sidemenu-profile-chevron"></i>
+            </button>
+            <div class="desktop-account-menu app-sidemenu-account-menu" id="desktop-account-menu" role="menu" aria-label="Menu de cuenta">
+                <div class="desktop-account-menu-detail" aria-label="Detalle de cuenta">
+                    <span class="desktop-account-detail-avatar" id="desktop-account-detail-avatar">U</span>
+                    <div class="desktop-account-menu-detail-body">
+                        <strong id="desktop-account-detail-project">{{BOT_NAME}}</strong>
+                        <span id="desktop-account-detail-name">Usuario</span>
+                        <div class="desktop-account-menu-detail-row">
+                            <span id="desktop-account-detail-email"></span>
+                            <span class="desktop-account-plan-badge" id="desktop-account-detail-plan">Sin plan</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="desktop-account-identifiers" id="desktop-account-identifiers" hidden>
+                    <button type="button" class="desktop-account-id-copy" id="desktop-account-project-id-copy" data-copy-label="Project ID" onclick="copyAccountIdentifier(event)">
+                        <span class="desktop-account-id-label">Project ID</span>
+                        <span class="desktop-account-id-value" id="desktop-account-project-id">-</span>
+                        <i class="fas fa-copy"></i>
+                    </button>
+                    <button type="button" class="desktop-account-id-copy" id="desktop-account-service-id-copy" data-copy-label="Service ID" onclick="copyAccountIdentifier(event)">
+                        <span class="desktop-account-id-label">Service ID</span>
+                        <span class="desktop-account-id-value" id="desktop-account-service-id">-</span>
+                        <i class="fas fa-copy"></i>
+                    </button>
+                </div>
+                <div class="desktop-account-menu-divider" role="separator"></div>
+                <button type="button" class="desktop-account-menu-item" id="desktop-notifications-btn" role="menuitem" onclick="closeDesktopAccountMenu(); openNotificationsModal(event)">
+                    <i class="fas fa-bell"></i>
+                    <span>Notificaciones</span>
+                    <span class="unread-badge desktop-account-menu-badge" id="desktop-badge-notifications-count" data-notifications-badge style="display:none;">0</span>
+                </button>
+                <button type="button" class="desktop-account-menu-item" id="desktop-support-btn" role="menuitem" onclick="closeDesktopAccountMenu(); openSupportWidget(event)">
+                    <i class="fas fa-headset"></i>
+                    <span>Soporte</span>
+                    <span class="unread-badge desktop-account-menu-badge" id="desktop-dot-support-widget" data-support-badge style="display:none;">0</span>
+                </button>
+                <div class="desktop-account-menu-divider" role="separator"></div>
+                <button type="button" class="desktop-account-menu-item" id="desktop-theme-btn" role="menuitem" onclick="toggleTheme()">
+                    <i id="desktop-theme-icon" class="fas fa-sun"></i>
+                    <span id="desktop-theme-label">Tema: Claro</span>
+                </button>
+                <button type="button" class="desktop-account-menu-item" role="menuitem" onclick="navigateFromDesktopAccount('/usuarios')">
+                    <i class="fas fa-user-plus"></i>
+                    <span>Nuevo usuario</span>
+                </button>
+                <button type="button" class="desktop-account-menu-item" id="desktop-system-config-account-item" role="menuitem" onclick="navigateFromDesktopAccount('/system-config')" style="display:none;">
+                    <i class="fas fa-gears"></i>
+                    <span>Configuracion</span>
+                </button>
+                <button type="button" class="desktop-account-menu-item desktop-account-menu-item-danger" role="menuitem" onclick="logout()">
+                    <i class="fas fa-power-off"></i>
+                    <span>Cerrar sesion</span>
+                </button>
+            </div>
+        </div>
+    </aside>
+
+    <!-- Mount point para views dinamicas -->
+    <div id="view-root" class="flex flex-1 flex-col overflow-hidden relative" style="z-index:10;">
+        <div id="section-header-root" class="no-print" hidden></div>
+        <div id="view-content-root" class="flex flex-1 overflow-hidden relative"></div>
+    </div>
+
+    <script src="/js/core/navigation-config.js"></script>
+    <script src="/js/core/section-header.js"></script>
+    <script src="/js/core/neural-bg.js"></script>
+    <script src="/app.js"></script>
+</body>
+
+</html>
