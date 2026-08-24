@@ -75,9 +75,10 @@ async function _getUserInfo(userId: string): Promise<{ role: string; projectId: 
 
 let _adminPassCacheKey = '';
 
-async function _fetchAdminPass(projectId: string, tenantId: string | null): Promise<string> {
+async function _fetchAdminPass(projectId: string): Promise<string> {
     const now = Date.now();
-    const currentKey = `${projectId}:${tenantId || 'global'}`;
+    const currentServiceId = (HistoryHandler as any).SERVICE_IDENTIFIER || 'default_service';
+    const currentKey = `${projectId}:${currentServiceId}`;
     if (_adminPassCacheKey === currentKey && _adminPassPromise !== null && (now - _adminPassAt) < ADMIN_PASS_TTL) {
         return _adminPassPromise;
     }
@@ -86,12 +87,7 @@ async function _fetchAdminPass(projectId: string, tenantId: string | null): Prom
     // Timeout de 3s: si Supabase tarda, no bloqueamos todas las requests
     const fallback = new Promise<string>(resolve => setTimeout(() => resolve(''), 3000));
     _adminPassPromise = Promise.race([
-        HistoryHandler.getSetting('ADMIN_PASS').then((dbPass) => {
-            if (tenantId) {
-                return dbPass || '';
-            }
-            return dbPass || process.env.ADMIN_PASS || process.env.BACKOFFICE_TOKEN || '';
-        }),
+        HistoryHandler.getSetting('ADMIN_PASS', projectId, currentServiceId).then((dbPass) => dbPass || process.env.ADMIN_PASS || process.env.BACKOFFICE_TOKEN || ''),
         fallback
     ]);
     return _adminPassPromise;
@@ -140,56 +136,47 @@ export const backofficeAuth = async (req: any, res: any, next: () => void) => {
     let userProjectId: string | null = null;
     let userServiceId: string | null = null;
 
-    // 3. Si es SUPERADMIN: permitir, no depende del tenant
+    // 3. Si es SUPERADMIN: permitir
     if (isSuperAdmin) {
         isValid = true;
-    } else {
-        // 4. Para autenticación normal: resolver tenant actual del PROJECT_X
-        const tenantResolution = await (HistoryHandler as any).resolveTenantIdByProjectId(projectId);
-        
-        // 5. Si Railway project está huérfano: 401 inmediatamente
-        if (!tenantResolution.resolved && !tenantResolution.globalScope) {
-            console.warn(`[AUTH] Proyecto ${projectId} huérfano. Rechazando acceso a ADMIN normal / Subuser.`);
-            isValid = false;
-        } else if (typeof token === 'string' && token.startsWith('sub:')) {
-            // 7. Si es sub:<uuid>: consultar usuario real en DB
-            userId = token.split(':')[1];
-            isSubUser = true;
-            try {
-                // Validación estricta y fresca contra DB (bypassing cache)
-                const user = await HistoryHandler.getUserById(userId, projectId);
-                if (user) {
-                    if (user.project_id === projectId && (user.service_id === null || user.service_id === currentServiceId)) {
-                        isValid = true;
-                        userRole = user.role || 'subuser';
-                        userProjectId = user.project_id;
-                        userServiceId = user.service_id;
-                        // Actualizar cache para otros usos no críticos
-                        _userCache.set(userId, { role: userRole, projectId: userProjectId, serviceId: userServiceId, timestamp: Date.now() } as any);
-                    } else {
-                        console.warn(`[AUTH] Usuario subuser existe pero no corresponde a este proyecto/servicio. project=${projectId}, userProject=${user.project_id}`);
-                    }
+    } else if (typeof token === 'string' && token.startsWith('sub:')) {
+        // 4. Si es sub:<uuid>: consultar usuario real en DB
+        userId = token.split(':')[1];
+        isSubUser = true;
+        try {
+            // Validación estricta y fresca contra DB (bypassing cache)
+            const user = await HistoryHandler.getUserById(userId, projectId);
+            if (user) {
+                if (user.project_id === projectId && (user.service_id === null || user.service_id === currentServiceId)) {
+                    isValid = true;
+                    userRole = user.role || 'subuser';
+                    userProjectId = user.project_id;
+                    userServiceId = user.service_id;
+                    // Actualizar cache para otros usos no críticos
+                    _userCache.set(userId, { role: userRole, projectId: userProjectId, serviceId: userServiceId, timestamp: Date.now() } as any);
                 } else {
-                    console.warn(`[AUTH] Token subuser inválido o usuario no existe/eliminado. id=${userId}`);
+                    console.warn(`[AUTH] Usuario subuser existe pero no corresponde a este proyecto/servicio. project=${projectId}, userProject=${user.project_id}`);
                 }
-            } catch (e) {
-                console.error('[AUTH] Error verificando usuario subuser:', e);
+            } else {
+                console.warn(`[AUTH] Token subuser inválido o usuario no existe/eliminado. id=${userId}`);
             }
-        } else {
-            // 6. Si es ADMIN normal (intento de login por token): obtener ADMIN_PASS correspondiente al scope actual
-            const adminPass = await _fetchAdminPass(projectId, tenantResolution.tenantId);
-            if (!adminPass) {
-                console.error('⚡⚡ [AUTH-NON-CONFIGURED] ⚡⚡');
-                console.error(`DETALLE: No se encontró 'ADMIN_PASS' en la tabla 'settings' ni 'BACKOFFICE_TOKEN'/'ADMIN_PASS' en variables de entorno.`);
-                console.error(`PROJECT_ID: ${projectId}`);
-            }
-            if (adminPass && token === adminPass) {
-                isValid = true;
-            }
+        } catch (e) {
+            console.error('[AUTH] Error verificando usuario subuser:', e);
+        }
+    } else {
+        // 5. Si es ADMIN normal (intento de login por token): obtener ADMIN_PASS correspondiente al scope actual
+        const adminPass = await _fetchAdminPass(projectId);
+        if (!adminPass) {
+            console.error('⚡⚡ [AUTH-NON-CONFIGURED] ⚡⚡');
+            console.error(`DETALLE: No se encontró 'ADMIN_PASS' en la tabla 'settings' ni 'BACKOFFICE_TOKEN'/'ADMIN_PASS' en variables de entorno.`);
+            console.error(`PROJECT_ID: ${projectId}`);
+        }
+        if (adminPass && token === adminPass) {
+            isValid = true;
         }
     }
     
-    // 8. Solo entonces: isValid = true
+    // 6. Solo entonces: isValid = true
     if (token && isValid) {
         req.auth = {
             isAdmin: !isSubUser || userRole === 'admin',

@@ -988,9 +988,9 @@ export const registerExternalApiRoutes = (app: any, deps: any) => {
 
         try {
             let accessToken = '';
-            let finalWabaId = wabaId;
-            let finalPhoneId = phoneNumberId;
-            let finalVerifiedName = verifiedName || '';
+            const finalWabaId = wabaId;
+            const finalPhoneId = phoneNumberId;
+            const finalVerifiedName = verifiedName || '';
 
             if (code) {
                 console.log(`📡 [API_CONNECT] Intercambiando code por Access Token para Proyecto: ${projectId}...`);

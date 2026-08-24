@@ -176,60 +176,8 @@ export class HistoryHandler {
     // In-memory caches to optimize database performance and avoid Disk I/O exhaustion (Supabase Best Practice)
     private static settingsCache = new Map<string, { value: string | null, timestamp: number }>();
     private static chatCache = new Map<string, { data: any, timestamp: number }>();
-    private static tenantCache = new Map<string, { tenantId: string | null, resolved: boolean, globalScope: boolean, timestamp: number }>();
     private static readonly CACHE_TTL_MS = 60 * 1000; // Settings cache: 1 minute
     private static readonly CHAT_CACHE_TTL_MS = 15 * 1000; // Chat cache: 15 seconds
-    private static readonly TENANT_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutos para hits positivos
-
-    static async resolveTenantIdByProjectId(projectId: string): Promise<{ tenantId: string | null, resolved: boolean, globalScope: boolean }> {
-        if (!projectId) return { tenantId: null, resolved: false, globalScope: false };
-
-        if (projectId === 'default_project' || projectId === 'neurolinks-control' || projectId === 'defaul') {
-            return { tenantId: null, resolved: true, globalScope: true };
-        }
-
-        if (projectId.startsWith('client_')) {
-            const cached = this.tenantCache.get(projectId);
-            if (cached && (Date.now() - cached.timestamp < this.TENANT_CACHE_TTL_MS)) {
-                return { tenantId: cached.tenantId, resolved: cached.resolved, globalScope: cached.globalScope };
-            }
-
-            const clientId = projectId.replace('client_', '');
-            const { data, error } = await supabase.from('clientes').select('auth_user_id').eq('id', clientId).maybeSingle();
-            if (error) {
-                console.error(`[HistoryHandler] Error consultando cliente ${clientId}:`, error);
-                throw error;
-            }
-            if (data && data.auth_user_id) {
-                const result = { tenantId: data.auth_user_id, resolved: true, globalScope: false };
-                this.tenantCache.set(projectId, { ...result, timestamp: Date.now() });
-                return result;
-            }
-            return { tenantId: null, resolved: false, globalScope: false };
-        }
-
-        // Para projects railway, NO usamos cache para detectar UNLINK rápido y desvincular inmediatamente
-        const { data: link, error: linkError } = await supabase.from('proyectos_railway').select('cliente_id').eq('railway_project_id', projectId).maybeSingle();
-        if (linkError) {
-            console.error(`[HistoryHandler] Error consultando proyecto ${projectId}:`, linkError);
-            throw linkError;
-        }
-
-        if (link && link.cliente_id) {
-            const { data: client, error: clientError } = await supabase.from('clientes').select('auth_user_id').eq('id', link.cliente_id).maybeSingle();
-            if (clientError) {
-                console.error(`[HistoryHandler] Error consultando cliente ${link.cliente_id}:`, clientError);
-                throw clientError;
-            }
-
-            if (client && client.auth_user_id) {
-                return { tenantId: client.auth_user_id, resolved: true, globalScope: false };
-            }
-        }
-
-        // Si no hay error pero no hay tenant_id (porque el proyecto o el cliente no existe/no está vinculado)
-        return { tenantId: null, resolved: false, globalScope: false };
-    }
 
     private static invalidateChatCache(rawChatId: string, projectId?: string) {
         const chatId = this.normalizeId(rawChatId);
@@ -3253,19 +3201,6 @@ export class HistoryHandler {
         try {
             const targetProjectId = projectId || PROJECT_ID;
             const targetServiceId = serviceId || HistoryHandler.SERVICE_IDENTIFIER;
-            const tenantResolution = await this.resolveTenantIdByProjectId(targetProjectId);
-
-            if (
-                !tenantResolution.resolved ||
-                tenantResolution.globalScope ||
-                !tenantResolution.tenantId
-            ) {
-                throw new Error(
-                    `[Tenant] No se pudo resolver tenant para Meta onboarding del proyecto ${targetProjectId}`
-                );
-            }
-
-            const tenantId = tenantResolution.tenantId;
 
             // Identificar al Super Usuario (Carlitos Pepe) para asignar propiedad
             let superUserId = null;
@@ -3436,23 +3371,6 @@ export class HistoryHandler {
     static async syncRoutingTableOnStartup() {
         try {
             if (!supabase) return;
-
-            const tenantResolution = await this.resolveTenantIdByProjectId(
-                this.PROJECT_IDENTIFIER
-            );
-
-            if (
-                !tenantResolution.resolved ||
-                tenantResolution.globalScope ||
-                !tenantResolution.tenantId
-            ) {
-                console.warn(
-                    `[HistoryHandler] Omitiendo sync de routing_table: tenant no resuelto para ${this.PROJECT_IDENTIFIER}`
-                );
-                return;
-            }
-
-            const tenantId = tenantResolution.tenantId;
 
             const onboardingData = await this.getMetaOnboardingData();
             if (!onboardingData || !onboardingData.phone_number_id) return;
@@ -3706,8 +3624,6 @@ export class HistoryHandler {
         // Invalidar cache en memoria
         const cacheKey = `${targetProjectId}:${targetServiceId}:${key}`;
         this.settingsCache.delete(cacheKey);
-
-        const tenantResolution = await this.resolveTenantIdByProjectId(targetProjectId);
 
         const payload: any = {
             project_id: targetProjectId,
@@ -3974,8 +3890,6 @@ export class HistoryHandler {
                 console.log(`ℹ️ [Bootstrap] Saltando clonación para proyecto maestro o por defecto.`);
                 return;
             }
-
-            const tenantResolution = await this.resolveTenantIdByProjectId(currentProjectId);
 
             // 1. Obtener todas las llaves configuradas en el proyecto actual
             const { data: currentSettings } = await supabase.from('settings')
@@ -4340,7 +4254,7 @@ export class HistoryHandler {
 
     /**
      * Resuelve el project_id a partir del número de teléfono o ID del bot.
-     * Útil para ruteo multitenant dinámico.
+     * Útil para ruteo dinámico.
      */
     static async getProjectIdByRecipient(recipientId: string | null): Promise<string | null> {
         if (!recipientId || !supabase) return null;
@@ -4404,7 +4318,7 @@ export class HistoryHandler {
 
     /**
      * Resuelve el service_id a partir del número de teléfono o ID del bot.
-     * Útil para ruteo multitenant dinámico.
+     * Útil para ruteo dinámico.
      */
     static async getServiceIdByRecipient(recipientId: string | null): Promise<string | null> {
         if (!recipientId || !supabase) return null;

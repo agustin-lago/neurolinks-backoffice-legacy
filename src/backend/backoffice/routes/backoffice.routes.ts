@@ -941,25 +941,13 @@ export const registerBackofficeRoutes = (app: any) => {
         let adminUser = '';
         let adminPass = '';
 
-        // 0. Bloquear login si es proyecto huérfano (salvo SuperAdmin)
         if (!isMaster) {
-            const tenantResolution = await (depsHistoryHandler as any).resolveTenantIdByProjectId(projectId);
-            if (!tenantResolution.resolved && !tenantResolution.globalScope) {
-                console.warn(`[AUTH-LOGIN] Proyecto ${projectId} huérfano. Rechazando intento de login normal.`);
-                return res.status(401).json({ success: false, error: "Credenciales inválidas" });
-            }
-
             // 1. Soporte para login dinámico
             const dbAdminUser = await depsHistoryHandler.getSetting('ADMIN_USER');
             const dbAdminPass = await depsHistoryHandler.getSetting('ADMIN_PASS');
 
-            if (tenantResolution.tenantId && !tenantResolution.globalScope) {
-                adminUser = dbAdminUser || ''; // Nunca hacer fallback a env para tenant real
-                adminPass = dbAdminPass || ''; // Nunca hacer fallback a env para tenant real
-            } else {
-                adminUser = dbAdminUser || process.env.ADMIN_USER || 'admin';
-                adminPass = dbAdminPass || process.env.ADMIN_PASS;
-            }
+            adminUser = dbAdminUser || process.env.ADMIN_USER || 'admin';
+            adminPass = dbAdminPass || process.env.ADMIN_PASS;
         } else {
             const dbAdminUser = await depsHistoryHandler.getSetting('ADMIN_USER');
             adminUser = dbAdminUser || process.env.ADMIN_USER || 'admin';
