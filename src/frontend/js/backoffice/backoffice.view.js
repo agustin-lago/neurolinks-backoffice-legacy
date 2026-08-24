@@ -71,9 +71,7 @@ window.backofficeView = {
                     </div>
                 </div>
                 <div id="chat-header" style="display: none;">
-                    <button class="mobile-back-btn" onclick="document.body.classList.remove('mobile-chat-active')" aria-label="Volver">
-                        <i class="fas fa-arrow-left"></i>
-                    </button>
+                    <button class="mobile-back-btn" onclick="typeof window.backofficeCloseMobileChat === 'function' ? window.backofficeCloseMobileChat() : document.body.classList.remove('mobile-chat-active')" aria-label="Volver">
                     <div class="header-user">
                         <div class="chat-avatar" id="active-chat-avatar"></div>
                         <div>
@@ -626,7 +624,7 @@ window.backofficeView = {
 
         // Inicializar FB cuando cargue
         if (!window.fbAsyncInit) {
-            window.fbAsyncInit = function() {
+            window.fbAsyncInit = function () {
                 const activeToken = localStorage.getItem('system_config_token') || localStorage.getItem('backoffice_token');
                 fetch('/api/backoffice/whatsapp/config?token=' + activeToken)
                     .then(res => res.json())
@@ -650,7 +648,7 @@ window.backofficeView = {
             window.initBackofficeView();
         }
 
-        window.toggleUnreadFilter = function(enabled) {
+        window.toggleUnreadFilter = function (enabled) {
             document.getElementById('unread-filter-all')?.classList.toggle('active', !enabled);
             document.getElementById('unread-filter-unread')?.classList.toggle('active', !!enabled);
             if (typeof window.executeUnreadFilter === 'function') {
@@ -658,7 +656,7 @@ window.backofficeView = {
             }
         };
 
-        window._toggleMobileHeaderMenu = function(e) {
+        window._toggleMobileHeaderMenu = function (e) {
             e.stopPropagation();
             const d = document.getElementById('mobile-header-dropdown');
             if (!d) return;
@@ -670,22 +668,22 @@ window.backofficeView = {
             const isOpen = d.classList.toggle('open');
             if (isOpen) document.addEventListener('click', window._closeMobileHeaderMenu, { once: true });
         };
-        window._closeMobileHeaderMenu = function() {
+        window._closeMobileHeaderMenu = function () {
             const d = document.getElementById('mobile-header-dropdown');
             if (d) d.classList.remove('open');
         };
-        window._toggleInputPlusMenu = function(e) {
+        window._toggleInputPlusMenu = function (e) {
             e.stopPropagation();
             const d = document.getElementById('input-plus-dropdown');
             if (!d) return;
             const isOpen = d.classList.toggle('open');
             if (isOpen) document.addEventListener('click', window._closeInputPlusMenu, { once: true });
         };
-        window._closeInputPlusMenu = function() {
+        window._closeInputPlusMenu = function () {
             const d = document.getElementById('input-plus-dropdown');
             if (d) d.classList.remove('open');
         };
-        window._inputPlusMenuAction = function(action, event) {
+        window._inputPlusMenuAction = function (action, event) {
             event?.stopPropagation?.();
             const fileAction = document.getElementById('input-plus-file-action');
             if (action === 'file') {
@@ -698,7 +696,7 @@ window.backofficeView = {
             }
             window._closeInputPlusMenu();
         };
-        window._openQuickMessagesPopover = function() {
+        window._openQuickMessagesPopover = function () {
             const popover = document.getElementById('quick-messages-popover');
             const metaPopover = document.getElementById('meta-templates-popover');
             if (metaPopover) metaPopover.style.display = 'none';
@@ -706,7 +704,7 @@ window.backofficeView = {
             popover.style.display = 'flex';
             window.loadQuickMessages?.();
         };
-        window._openMetaTemplatesPopover = function() {
+        window._openMetaTemplatesPopover = function () {
             const popover = document.getElementById('meta-templates-popover');
             const quickPopover = document.getElementById('quick-messages-popover');
             if (quickPopover) quickPopover.style.display = 'none';
@@ -715,7 +713,7 @@ window.backofficeView = {
             window.backToMetaTemplatesList?.();
             window.loadMetaTemplates?.();
         };
-        window.handleMessageInputChange = function(input) {
+        window.handleMessageInputChange = function (input) {
             window.autoResizeChatTextarea?.(input);
             const value = input?.value || '';
             const command = value.startsWith('./') ? 'quick' : (value.startsWith('/') ? 'meta' : '');
@@ -732,7 +730,7 @@ window.backofficeView = {
             if (command === 'quick') window._openQuickMessagesPopover();
             if (command === 'meta') window._openMetaTemplatesPopover();
         };
-        window.closeCommandPopover = function(type, event) {
+        window.closeCommandPopover = function (type, event) {
             event?.stopPropagation?.();
             const popoverId = type === 'quick' ? 'quick-messages-popover' : 'meta-templates-popover';
             const popover = document.getElementById(popoverId);
@@ -740,7 +738,7 @@ window.backofficeView = {
             window.clearCommandInputPrefix?.(type);
         };
 
-        window.clearCommandInputPrefix = function(type) {
+        window.clearCommandInputPrefix = function (type) {
             const input = document.getElementById('message-input');
             if (input) {
                 const command = type === 'quick' ? './' : '/';
@@ -752,7 +750,7 @@ window.backofficeView = {
                 }
             }
         };
-        window._headerMenuAction = function(action) {
+        window._headerMenuAction = function (action) {
             const buttonByAction = {
                 tags: 'open-tags-btn',
                 crm: 'open-crm-btn',
@@ -764,7 +762,7 @@ window.backofficeView = {
             btn.click();
             window._closeMobileHeaderMenu();
         };
-        window._toggleTagFilter = function(e) {
+        window._toggleTagFilter = function (e) {
             e.stopPropagation();
             const dd = document.getElementById('tag-filter-dropdown');
             const icon = document.getElementById('tag-filter-chevron-icon');
@@ -775,7 +773,7 @@ window.backofficeView = {
             if (label && cur) {
                 if (cur.value) {
                     const tags = (typeof _boBotTags !== 'undefined') ? _boBotTags : [];
-                    const tag  = tags.find(t => String(t.id) === String(cur.value));
+                    const tag = tags.find(t => String(t.id) === String(cur.value));
                     const color = tag ? tag.color : '#6366f1';
                     label.innerHTML = `<span class="tag-pill" data-tag-color="${color}" style="${_tagStyle(color)}">${cur.textContent}</span>`;
                 } else {
@@ -788,7 +786,7 @@ window.backofficeView = {
                 const active = opt.value === select.value;
                 if (opt.value) {
                     const tags = (typeof _boBotTags !== 'undefined') ? _boBotTags : [];
-                    const tag  = tags.find(t => String(t.id) === String(opt.value));
+                    const tag = tags.find(t => String(t.id) === String(opt.value));
                     const color = tag ? tag.color : '#6366f1';
                     li.innerHTML = `<span class="tag-pill" data-tag-color="${color}" style="${_tagStyle(color)}">${opt.textContent}</span>`;
                 } else {
@@ -815,7 +813,7 @@ window.backofficeView = {
                 if (icon) icon.style.transform = '';
             }, { once: true });
         };
-        window._crmJumpDefault = function() {
+        window._crmJumpDefault = function () {
             const select = document.getElementById('crm-lead-jump');
             if (!select) return;
             const first = Array.from(select.options).find(o => o.value);
@@ -823,7 +821,7 @@ window.backofficeView = {
             select.value = first.value;
             if (typeof jumpToCRM === 'function') jumpToCRM();
         };
-        window._toggleCRMJumpMenu = function(e) {
+        window._toggleCRMJumpMenu = function (e) {
             e.stopPropagation();
             const dd = document.getElementById('crm-jump-dropdown');
             const icon = document.getElementById('crm-jump-chevron-icon');
@@ -850,7 +848,7 @@ window.backofficeView = {
                 if (icon) icon.style.transform = '';
             }, { once: true });
         };
-        window._mobileToggleBotClick = function() {
+        window._mobileToggleBotClick = function () {
             const real = document.getElementById('bot-toggle');
             const mob = document.getElementById('mobile-bot-toggle');
             if (!real || real.disabled || !mob) return;

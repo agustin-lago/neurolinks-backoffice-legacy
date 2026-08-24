@@ -41,6 +41,7 @@ window.__activeBackofficeChatId = null;
 let _activeChatSyncTimer = null;
 let _syncingActiveChat = false;
 let _backofficeChatScrollTop = null;
+let _backofficeChatListScrollTop = 0;
 let _restoringBackofficeView = false;
 let _globalBotEnabled = localStorage.getItem(getGlobalBotCacheKey()) !== 'false';
 
@@ -65,6 +66,75 @@ function isBotEffectivelyEnabled(chatOrEnabled) {
 function rememberBackofficeChatScroll() {
     const messages = document.getElementById('messages');
     if (messages) _backofficeChatScrollTop = messages.scrollTop;
+}
+
+function rememberBackofficeChatListScroll() {
+    const list = document.getElementById('chat-list');
+    if (list && list.clientHeight > 0) {
+        _backofficeChatListScrollTop = list.scrollTop;
+    }
+}
+
+function restoreBackofficeChatListScroll() {
+    const list = document.getElementById('chat-list');
+    if (!list) return;
+
+    const target = _backofficeChatListScrollTop || 0;
+    requestAnimationFrame(() => {
+        list.scrollTop = target;
+    });
+    setTimeout(() => {
+        const currentList = document.getElementById('chat-list');
+        if (currentList) currentList.scrollTop = target;
+    }, 50);
+}
+
+window.backofficeCloseMobileChat = function () {
+    document.body.classList.remove('mobile-chat-active');
+    restoreBackofficeChatListScroll();
+};
+
+function handleBackofficeChatListScroll() {
+    if (this.clientHeight > 0) {
+        _backofficeChatListScrollTop = this.scrollTop;
+    }
+
+    const { scrollTop, scrollHeight, clientHeight } = this;
+    if (scrollTop + clientHeight >= scrollHeight - 20) {
+        if (!loadingChats && !allChatsLoaded) fetchChats();
+    }
+}
+
+function handleBackofficeMessagesScroll() {
+    if (this.scrollTop < 50 && !loadingMessages && !allMessagesLoaded) {
+        fetchMessages(activeChatId);
+    }
+}
+
+function bindBackofficeMobileCloseButtons() {
+    document.querySelectorAll('.mobile-back-btn').forEach((button) => {
+        if (button.dataset.backofficeScrollBound === 'true') return;
+        button.dataset.backofficeScrollBound = 'true';
+        button.addEventListener('click', () => {
+            setTimeout(restoreBackofficeChatListScroll, 0);
+        }, { passive: true });
+    });
+}
+
+function attachBackofficeScrollListeners() {
+    const chatList = document.getElementById('chat-list');
+    if (chatList) {
+        chatList.removeEventListener('scroll', handleBackofficeChatListScroll);
+        chatList.addEventListener('scroll', handleBackofficeChatListScroll, { passive: true });
+    }
+
+    const messagesEl = document.getElementById('messages');
+    if (messagesEl) {
+        messagesEl.removeEventListener('scroll', handleBackofficeMessagesScroll);
+        messagesEl.addEventListener('scroll', handleBackofficeMessagesScroll);
+    }
+
+    bindBackofficeMobileCloseButtons();
 }
 
 function clearActiveChatSelection() {
@@ -215,12 +285,12 @@ async function initSuperAdminMode(settings) {
         const data = await res.json();
         if (data.success && Array.isArray(data.services)) {
             _projectServices = data.services;
-            
+
             const filterContainer = document.getElementById('multi-crm-selector-container');
             if (filterContainer) {
                 filterContainer.style.display = 'block';
             }
-            
+
             const selectEl = document.getElementById('multi-crm-service-filter');
             if (selectEl) {
                 const currentValue = selectEl.value || 'all';
@@ -234,7 +304,7 @@ async function initSuperAdminMode(settings) {
     }
 }
 
-window.filterChatsByService = function(val) {
+window.filterChatsByService = function (val) {
     _activeServiceFilter = val;
     fetchChats(true);
 };
@@ -875,7 +945,17 @@ async function fetchChats(refresh = false) {
         if (newChats.length < CHAT_LIMIT) allChatsLoaded = true;
 
         if (refresh) {
-            chats = newChats;
+            // Si el usuario ya tenía más chats cargados por scroll previo y no está aplicando filtros nuevos,
+            // actualizamos los datos de los chats existentes sin truncar la lista a 50 para no perder el scroll.
+            if (chats.length > CHAT_LIMIT && !query && !tagFilter) {
+                const newMap = new Map(newChats.map(c => [c.id, c]));
+                const updatedChats = chats.map(c => newMap.has(c.id) ? { ...c, ...newMap.get(c.id) } : c);
+                const existingIds = new Set(chats.map(c => c.id));
+                const freshNew = newChats.filter(nc => !existingIds.has(nc.id));
+                chats = freshNew.length > 0 ? [...freshNew, ...updatedChats] : updatedChats;
+            } else {
+                chats = newChats;
+            }
         } else {
             // Evitar duplicados si hay mensajes en tiempo real entrando
             const existingIds = chats.map(c => c.id);
@@ -1000,7 +1080,13 @@ function renderChatList(listToRender = chats) {
     const list = document.getElementById('chat-list');
     if (!list) return;
 
-    const prevScrollTop = list.scrollTop;
+    // Solo leer el scrollTop si la lista es visible (clientHeight > 0).
+    // Si la lista está oculta (por ejemplo en móvil dentro de un chat), usar el scroll previamente guardado.
+    const isVisible = list.clientHeight > 0;
+    if (isVisible && list.scrollTop > 0) {
+        _backofficeChatListScrollTop = list.scrollTop;
+    }
+    const prevScrollTop = _backofficeChatListScrollTop || 0;
 
     let filteredList = listToRender;
     if (_isSuperAdminMode && _activeServiceFilter !== 'all') {
@@ -1066,7 +1152,7 @@ function renderChatList(listToRender = chats) {
         const timeStr = formatLastMessageTime(chat.last_message_at);
         const unreadCount = chat.unread_count || 0;
         const displayCount = unreadCount > 99 ? '+99' : unreadCount;
-        
+
         const hasUnread = _notificationsActive && unreadCount > 0;
         const timeHtml = `<span style="font-size: 0.65rem; opacity: 0.7; font-weight: 500; margin-bottom: 2px;">${timeStr}</span>`;
         const unreadHtml = hasUnread ? `<div class="unread-badge">${displayCount}</div>` : '';
@@ -1126,8 +1212,13 @@ function renderChatList(listToRender = chats) {
         `;
     }).join('');
 
+    if (isVisible) {
+        list.scrollTop = prevScrollTop;
+    }
     requestAnimationFrame(() => {
-        if (list) list.scrollTop = prevScrollTop;
+        if (list && list.clientHeight > 0) {
+            list.scrollTop = prevScrollTop;
+        }
     });
 }
 
@@ -1184,6 +1275,7 @@ async function checkPlatformVisibility() {
 }
 
 async function selectChat(id) {
+    rememberBackofficeChatListScroll();
     if (_isRecording) cancelRecording();
     activeChatId = id;
     window.__activeBackofficeChatId = id;
@@ -3153,20 +3245,7 @@ if (urlParams.get('openPanel') === 'meta') {
 }
 
 // Listeners para Infinite Scroll - con null check para no crashear si el script carga fuera del view
-const _chatListEl = document.getElementById('chat-list');
-if (_chatListEl) _chatListEl.addEventListener('scroll', function () {
-    const { scrollTop, scrollHeight, clientHeight } = this;
-    if (scrollTop + clientHeight >= scrollHeight - 20) {
-        if (!loadingChats && !allChatsLoaded) fetchChats();
-    }
-});
-
-const _messagesEl = document.getElementById('messages');
-if (_messagesEl) _messagesEl.addEventListener('scroll', function () {
-    if (this.scrollTop < 50 && !loadingMessages && !allMessagesLoaded) {
-        fetchMessages(activeChatId);
-    }
-});
+attachBackofficeScrollListeners();
 
 // --- BULK MESSAGING LOGIC ---
 
@@ -4544,23 +4623,7 @@ window.initBackofficeView = function () {
     loadNotificationsStatus();
 
     // Re-attach scroll listeners en el nuevo DOM
-    const chatList = document.getElementById('chat-list');
-    if (chatList) {
-        chatList.addEventListener('scroll', function () {
-            const { scrollTop, scrollHeight, clientHeight } = this;
-            if (scrollTop + clientHeight >= scrollHeight - 20) {
-                if (!loadingChats && !allChatsLoaded) fetchChats();
-            }
-        });
-    }
-    const messagesEl = document.getElementById('messages');
-    if (messagesEl) {
-        messagesEl.addEventListener('scroll', function () {
-            if (this.scrollTop < 50 && !loadingMessages && !allMessagesLoaded) {
-                fetchMessages(activeChatId);
-            }
-        });
-    }
+    attachBackofficeScrollListeners();
 
     // Ocultar mic al escribir, mostrar al vaciar (como WhatsApp)
     const msgInput = document.getElementById('message-input');
@@ -5068,7 +5131,7 @@ window.selectMetaTemplateForChat = function (templateName) {
     if (buttonsComp && Array.isArray(buttonsComp.buttons)) {
         buttonsComp.buttons.forEach((btn, idx) => {
             if (btn.type === 'URL' && btn.url && btn.url.includes('{{1}}')) {
-                window._metaTemplateFormValues[`_button_${idx+1}_url_suffix`] = '';
+                window._metaTemplateFormValues[`_button_${idx + 1}_url_suffix`] = '';
             }
         });
     }
@@ -5306,7 +5369,7 @@ document.addEventListener('click', (e) => {
 });
 
 
-window.toggleMsgDropdown = function(msgId) {
+window.toggleMsgDropdown = function (msgId) {
     const menu = document.getElementById("dropdown-" + msgId);
     const isShowing = menu && menu.classList.contains('show');
 
@@ -5338,7 +5401,7 @@ document.addEventListener('click', () => {
 });
 
 
-window.copyMessage = function(msgId) {
+window.copyMessage = function (msgId) {
     document.querySelectorAll('.msg-dropdown-menu.show').forEach(m => { m.classList.remove('show'); m.classList.remove('menu-up'); });
     const msg = allMessages.find(m => m.id === msgId || m.external_id === msgId);
     if (!msg || !msg.content) return;
@@ -5347,7 +5410,7 @@ window.copyMessage = function(msgId) {
     }).catch(err => console.error('Error copying text: ', err));
 };
 
-window.copySelectedMessageText = function(msgId) {
+window.copySelectedMessageText = function (msgId) {
     const menu = document.getElementById("dropdown-" + msgId);
     const msgContainer = menu?.closest('.msg') || document.querySelector(`.msg[data-id="${CSS.escape(msgId)}"]`);
     const selectedText = menu?.dataset.selectedText || getSelectedTextForMessage(msgContainer);
@@ -5364,7 +5427,7 @@ window.copySelectedMessageText = function(msgId) {
     }).catch(err => console.error('Error copying selected text: ', err));
 };
 
-window.replyToMessage = function(msgId) {
+window.replyToMessage = function (msgId) {
     closeMessageMenus();
     const msg = findMessageById(msgId);
     if (!msg) return;
@@ -5380,14 +5443,14 @@ window.replyToMessage = function(msgId) {
     if (input) input.focus();
 };
 
-window.cancelReply = function() {
+window.cancelReply = function () {
     replyTargetMessageId = null;
     replyTargetMessage = null;
     const container = document.getElementById('reply-preview-container');
     if (container) container.style.display = 'none';
 };
 
-window.deleteMessage = async function(messageId) {
+window.deleteMessage = async function (messageId) {
     closeMessageMenus();
     if (!activeChatId || !messageId) return;
     if (!await window.swalConfirm('\u00bfEliminar mensaje?', '\u00bfEst\u00e1s seguro de que deseas eliminar el mensaje?')) return;
@@ -5414,7 +5477,7 @@ window.deleteMessage = async function(messageId) {
     }
 };
 
-window.openForwardModal = function(mediaUrl, mediaType) {
+window.openForwardModal = function (mediaUrl, mediaType) {
     closeMessageMenus();
     if (!mediaType) {
         const msg = findMessageById(mediaUrl);
@@ -5433,7 +5496,7 @@ window.openForwardModal = function(mediaUrl, mediaType) {
     renderForwardChatsList();
 };
 
-window.reactToMessage = async function(msgId, reaction) {
+window.reactToMessage = async function (msgId, reaction) {
     closeMessageMenus();
     if (!activeChatId || !msgId) return;
     try {
@@ -5456,7 +5519,7 @@ window.reactToMessage = async function(msgId, reaction) {
     }
 };
 
-window.toggleMsgDropdown = function(msgId) {
+window.toggleMsgDropdown = function (msgId) {
     const menu = document.getElementById("dropdown-" + msgId);
     const isShowing = menu && menu.classList.contains('show');
     if (!menu) return;
@@ -5491,7 +5554,7 @@ window.toggleMsgDropdown = function(msgId) {
 
 
 // --- Funciones Globales para Textareas de Chat (Movidas desde crm-common) ---
-window.handleChatTextareaKey = function(e, sendCallback) {
+window.handleChatTextareaKey = function (e, sendCallback) {
     if (e.key === 'Enter') {
         if (window.innerWidth <= 1024) {
             return;
@@ -5503,7 +5566,7 @@ window.handleChatTextareaKey = function(e, sendCallback) {
         }
     }
 };
-window.autoResizeChatTextarea = function(el) {
+window.autoResizeChatTextarea = function (el) {
     el.style.height = 'auto';
     const paddingY = 16;
     const lineHeight = 20;
@@ -5511,7 +5574,7 @@ window.autoResizeChatTextarea = function(el) {
     const maxHeight = paddingY + (lineHeight * maxLines);
     el.style.height = Math.min(el.scrollHeight, maxHeight) + 'px';
 };
-window.resetChatTextarea = function(el) {
+window.resetChatTextarea = function (el) {
     if (!el) return;
     el.value = '';
     el.style.height = 'auto';

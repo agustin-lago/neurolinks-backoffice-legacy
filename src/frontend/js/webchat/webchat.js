@@ -17,6 +17,24 @@ if (window.visualViewport) {
 
 // ===== Autosize helpers (sin estado global de DOM) =====
 let _wcMinH = 45, _wcMaxH = 120, _wcBaseH = 45;
+let _webchatCleanupFns = [];
+
+function _listen(target, event, handler, options) {
+    if (!target) return;
+    target.addEventListener(event, handler, options);
+    _webchatCleanupFns.push(() => target.removeEventListener(event, handler, options));
+}
+
+window.destroyWebchatView = function () {
+    _webchatCleanupFns.forEach(fn => {
+        try {
+            fn();
+        } catch (_) {
+            // Ignore cleanup failures from stale DOM nodes.
+        }
+    });
+    _webchatCleanupFns = [];
+};
 
 function _computeHeights(el) {
     const cs = getComputedStyle(el);
@@ -40,6 +58,10 @@ function _autosizeSmart(el) {
 
 // ===== SPA entry point =====
 window.initWebchatView = function () {
+    if (typeof window.destroyWebchatView === 'function') {
+        window.destroyWebchatView();
+    }
+
     const _input    = document.getElementById('input');
     const _send     = document.getElementById('send');
     const _attach   = document.getElementById('attach');
@@ -89,9 +111,12 @@ window.initWebchatView = function () {
     }
 
     async function _runWebchatCommand(command) {
-        const res = await fetch(`/webchat-api/command?token=${encodeURIComponent(token || '')}`, {
+        const res = await fetch('/webchat-api/command', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token || ''}`
+            },
             body: JSON.stringify({
                 command,
                 projectId: window.railwayProjectId || '',
@@ -192,16 +217,20 @@ window.initWebchatView = function () {
     }
 
     // Event listeners (solo aqui, sin duplicados top-level)
-    _input.addEventListener('input', function () {
+    const handleInput = function () {
         _autosizeSmart(this);
         const c = _chat(); if (c) c.scrollTop = c.scrollHeight;
-    });
-    _input.addEventListener('focus', () => {
+    };
+    _listen(_input, 'input', handleInput);
+
+    const handleInputFocus = () => {
         _autosizeSmart(_input);
         const c = _chat(); if (c) c.scrollTop = 99999;
-    });
+    };
+    _listen(_input, 'focus', handleInputFocus);
+
     _send.onclick = _doSend;
-    _input.addEventListener('keydown', function (e) {
+    const handleInputKeydown = function (e) {
         if (e.key === 'Enter') {
             if (window.innerWidth <= 1024) {
                 return;
@@ -212,7 +241,8 @@ window.initWebchatView = function () {
                 }
             }
         }
-    });
+    };
+    _listen(_input, 'keydown', handleInputKeydown);
 
     if (_attach && _fileInput) {
         _attach.onclick = (e) => { e.preventDefault(); _fileInput.click(); };
@@ -230,17 +260,20 @@ window.initWebchatView = function () {
         if (actionsModal) actionsModal.classList.remove('active');
     }
 
-    actionsOpenBtn?.addEventListener('click', _openActionsModal);
-    actionsCloseBtn?.addEventListener('click', _closeActionsModal);
-    actionsModal?.addEventListener('click', (e) => {
+    _listen(actionsOpenBtn, 'click', _openActionsModal);
+    _listen(actionsCloseBtn, 'click', _closeActionsModal);
+    const handleActionsModalClick = (e) => {
         if (e.target === actionsModal) _closeActionsModal();
-    });
-    document.addEventListener('keydown', (e) => {
+    };
+    _listen(actionsModal, 'click', handleActionsModalClick);
+
+    const handleDocumentKeydown = (e) => {
         if (e.key === 'Escape' && actionsModal?.classList.contains('active')) _closeActionsModal();
-    });
+    };
+    _listen(document, 'keydown', handleDocumentKeydown);
 
     document.querySelectorAll('[data-webchat-command]').forEach((button) => {
-        button.addEventListener('click', async () => {
+        _listen(button, 'click', async () => {
             const command = button.dataset.webchatCommand;
             if (!command) return;
             if (command === 'HILO_NUEVO') {
@@ -268,7 +301,7 @@ window.initWebchatView = function () {
     });
 
     // Recalcular alturas en resize
-    window.addEventListener('resize', () => {
+    const handleResize = () => {
         const prev = _wcBaseH;
         ({ minH: _wcMinH, maxH: _wcMaxH, baseH: _wcBaseH } = _computeHeights(_input));
         if ((parseFloat(_input.style.height) || prev) <= prev + 1) {
@@ -276,7 +309,8 @@ window.initWebchatView = function () {
         } else {
             _autosizeSmart(_input);
         }
-    }, { passive: true });
+    };
+    _listen(window, 'resize', handleResize, { passive: true });
 
     // Nombre del asistente
     fetch('/api/assistant-name').then(r => r.json()).then(d => {

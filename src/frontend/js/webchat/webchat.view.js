@@ -194,5 +194,9 @@ window.webchatView = {
         if (typeof window.initWebchatView === 'function') window.initWebchatView();
     },
 
-    destroy() {}
+    destroy() {
+        if (typeof window.destroyWebchatView === 'function') {
+            window.destroyWebchatView();
+        }
+    }
 };

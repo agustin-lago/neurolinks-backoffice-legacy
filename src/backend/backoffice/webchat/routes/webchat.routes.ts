@@ -31,45 +31,149 @@ function getWebchatClientKey(req: any): string {
     ip = ip.replace(/^::ffff:/, '');
     return ip || '127.0.0.1';
 }
+function resolveWebchatOperationalScope(req: any, HistoryHandler: any): { success: true; projectId: string; serviceId: string } | { success: false; status: number; error: string } {
+    const runtimeProjectId = HistoryHandler.PROJECT_IDENTIFIER;
+    const runtimeServiceId = HistoryHandler.SERVICE_IDENTIFIER;
+    const requestedProjectId = String(req.body?.projectId || req.query?.projectId || '').trim();
+    const requestedServiceId = String(req.body?.serviceId || req.query?.serviceId || '').trim();
 
+    if (requestedProjectId && requestedProjectId !== runtimeProjectId) {
+        return { success: false, status: 403, error: 'Project scope mismatch' };
+    }
+
+    if (requestedServiceId && requestedServiceId !== runtimeServiceId) {
+        return { success: false, status: 403, error: 'Service scope mismatch' };
+    }
+
+    return { success: true, projectId: runtimeProjectId, serviceId: runtimeServiceId };
+}
 export const registerWebchatRoutes = (app: any) => {
 
     app.post('/webchat-api/command', backofficeAuth, async (req: any, res: any) => {
         const command = String(req.body?.command || '').trim().toUpperCase();
-        const ip = getWebchatClientKey(req);
+        const clientKey = getWebchatClientKey(req);
 
         try {
             const { HistoryHandler } = await import("../../../db/historyHandler");
-            const projectId = String(req.body?.projectId || req.query?.projectId || process.env.RAILWAY_PROJECT_ID || HistoryHandler.PROJECT_IDENTIFIER || '').trim();
-            const serviceId = String(req.body?.serviceId || req.query?.serviceId || process.env.RAILWAY_SERVICE_ID || HistoryHandler.SERVICE_IDENTIFIER || '').trim();
-            const session = webChatManager.getSession(ip);
+            const scope = resolveWebchatOperationalScope(req, HistoryHandler);
+            if (!scope.success) {
+                const failedScope = scope as { success: false; status: number; error: string };
+                return res.status(failedScope.status).json({ success: false, error: failedScope.error });
+            }
+            const { projectId, serviceId } = scope;
+            const session = webChatManager.getSession(clientKey);
 
             if (command === 'RESET' || command === '#RESET#') {
+                const agentReset = await HistoryHandler.setAssignedAgent(clientKey, 'asistente1', projectId, serviceId);
+                if (!agentReset) {
+                    return res.status(500).json({
+                        success: false,
+                        command: 'RESET',
+                        agentReset: false,
+                        threadCleared: false,
+                        error: 'No se pudo reiniciar el asistente del webchat.'
+                    });
+                }
+
+                const threadCleared = await HistoryHandler.clearThreadId(clientKey, projectId, serviceId);
+                if (!threadCleared) {
+                    return res.status(500).json({
+                        success: false,
+                        partial: true,
+                        command: 'RESET',
+                        agentReset: true,
+                        threadCleared: false,
+                        error: 'Asistente reiniciado, pero no se pudo limpiar el thread del webchat.'
+                    });
+                }
+
                 session.thread_id = null;
                 (session as any).assignedAgent = 'asistente1';
-                await HistoryHandler.setAssignedAgent(ip, 'asistente1', projectId, serviceId || undefined);
-                await HistoryHandler.saveThreadId(ip, '', projectId, serviceId || undefined);
-                return res.json({ success: true, command: 'RESET', message: 'Reset aplicado solo al webchat.' });
+                return res.json({
+                    success: true,
+                    command: 'RESET',
+                    agentReset: true,
+                    threadCleared: true,
+                    message: 'Reset aplicado solo al webchat.'
+                });
             }
 
             if (command === 'HILO_NUEVO' || command === '#HILO_NUEVO#') {
+                const historyCleared = await HistoryHandler.clearChatHistory(clientKey, projectId, serviceId);
+                if (!historyCleared) {
+                    return res.status(500).json({
+                        success: false,
+                        command: 'HILO_NUEVO',
+                        historyCleared: false,
+                        agentReset: false,
+                        threadCleared: false,
+                        error: 'No se pudo limpiar el historial del webchat.'
+                    });
+                }
+
+                const agentReset = await HistoryHandler.setAssignedAgent(clientKey, 'asistente1', projectId, serviceId);
+                if (!agentReset) {
+                    return res.status(500).json({
+                        success: false,
+                        partial: true,
+                        command: 'HILO_NUEVO',
+                        historyCleared: true,
+                        agentReset: false,
+                        threadCleared: false,
+                        error: 'Historial limpiado, pero no se pudo reiniciar el asistente del webchat.'
+                    });
+                }
+
+                const threadCleared = await HistoryHandler.clearThreadId(clientKey, projectId, serviceId);
+                if (!threadCleared) {
+                    return res.status(500).json({
+                        success: false,
+                        partial: true,
+                        command: 'HILO_NUEVO',
+                        historyCleared: true,
+                        agentReset: true,
+                        threadCleared: false,
+                        error: 'Historial y asistente reiniciados, pero no se pudo limpiar el thread del webchat.'
+                    });
+                }
+
                 session.clear();
                 (session as any).assignedAgent = 'asistente1';
-                await HistoryHandler.clearChatHistory(ip, projectId, serviceId || undefined);
-                await HistoryHandler.setAssignedAgent(ip, 'asistente1', projectId, serviceId || undefined);
-                await HistoryHandler.saveThreadId(ip, '', projectId, serviceId || undefined);
-                return res.json({ success: true, command: 'HILO_NUEVO', clearChat: true, message: 'Hilo nuevo iniciado solo para el webchat.' });
+                session.thread_id = null;
+                return res.json({
+                    success: true,
+                    command: 'HILO_NUEVO',
+                    clearChat: true,
+                    historyCleared: true,
+                    agentReset: true,
+                    threadCleared: true,
+                    message: 'Hilo nuevo iniciado solo para el webchat.'
+                });
             }
 
             if (command === 'CLEAR_CONTEXT' || command === '#CLEAR_CONTEXT#') {
+                const contextCleared = await HistoryHandler.clearClientContext(clientKey, projectId, serviceId);
+                if (!contextCleared) {
+                    return res.status(500).json({
+                        success: false,
+                        command: 'CLEAR_CONTEXT',
+                        contextCleared: false,
+                        error: 'No se pudo eliminar el contexto.'
+                    });
+                }
+
                 const keys = Object.keys(session);
                 for (const k of keys) {
                     if (k !== 'history' && k !== 'thread_id') {
                         delete session[k];
                     }
                 }
-                await HistoryHandler.clearClientContext(ip, projectId, serviceId || undefined);
-                return res.json({ success: true, command: 'CLEAR_CONTEXT', message: 'Contexto de cliente eliminado de la sesión del webchat.' });
+                return res.json({
+                    success: true,
+                    command: 'CLEAR_CONTEXT',
+                    contextCleared: true,
+                    message: 'Contexto de cliente eliminado de la sesion del webchat.'
+                });
             }
 
             return res.status(400).json({ success: false, error: 'Comando no soportado para webchat.' });
@@ -224,7 +328,7 @@ export const registerWebchatRoutes = (app: any) => {
                     if (msg.toLowerCase() === '#reset#') {
                         console.log(`[Webchat] 🔄 Reset solicitado para: ${uid}`);
                         await state.update({ thread_id: null });
-                        await HistoryHandler.saveThreadId(uid, '', projId || projectId, serviceId || undefined); // Limpiar en DB
+                        await HistoryHandler.clearThreadId(uid, projId || projectId, serviceId || undefined);
                         return res.json({ response: "🔄 Sesión reiniciada. ¿En qué puedo ayudarte?" });
                     }
 

@@ -179,13 +179,23 @@ export class HistoryHandler {
     private static readonly CACHE_TTL_MS = 60 * 1000; // Settings cache: 1 minute
     private static readonly CHAT_CACHE_TTL_MS = 15 * 1000; // Chat cache: 15 seconds
 
-    private static invalidateChatCache(rawChatId: string, projectId?: string) {
+    private static invalidateChatCache(rawChatId: string, projectId?: string, serviceId?: string | null) {
         const chatId = this.normalizeId(rawChatId);
         const currentProjectId = projectId || this.PROJECT_IDENTIFIER;
-        const cacheKey = `${currentProjectId}:${chatId}`;
-        this.chatCache.delete(cacheKey);
-    }
 
+        if (serviceId) {
+            this.chatCache.delete(`${currentProjectId}:${serviceId}:${chatId}`);
+            return;
+        }
+
+        const prefix = `${currentProjectId}:`;
+        const suffix = `:${chatId}`;
+        for (const key of this.chatCache.keys()) {
+            if (key.startsWith(prefix) && key.endsWith(suffix)) {
+                this.chatCache.delete(key);
+            }
+        }
+    }
     static getSupabase() {
         return supabase;
     }
@@ -866,7 +876,7 @@ export class HistoryHandler {
                 updatePayload.name = contextData.nombre;
             }
 
-            this.invalidateChatCache(chatId, currentProjectId);
+            this.invalidateChatCache(chatId, currentProjectId, currentServiceId);
             let query = supabase
                 .from('chats')
                 .update(updatePayload)
@@ -955,7 +965,7 @@ export class HistoryHandler {
 
             const { error } = await updateQuery;
             if (error) throw error;
-            this.invalidateChatCache(chatId, currentProjectId);
+            this.invalidateChatCache(chatId, currentProjectId, currentServiceId);
             historyEvents.emit('contact_updated', {
                 chatId,
                 project_id: currentProjectId,
@@ -1026,7 +1036,7 @@ export class HistoryHandler {
         }
 
         // Invalidar cache del chat
-        this.invalidateChatCache(chatId, currentProjectId);
+        this.invalidateChatCache(chatId, currentProjectId, currentServiceId);
 
         try {
             let query = supabase
@@ -1117,7 +1127,7 @@ export class HistoryHandler {
                 // Si lo encontramos por Phone pero no tiene el user_id (BSUID) guardado, lo actualizamos
                 if (data && userId && !data.user_id) {
                     console.log(`[HistoryHandler] 🔗 Mapeando BSUID ${userId} al chat existente ${chatId}`);
-                    this.invalidateChatCache(chatId, currentProjectId);
+                    this.invalidateChatCache(chatId, currentProjectId, currentServiceId);
                     let updateQuery = supabase.from('chats')
                         .update({ user_id: userId })
                         .eq('id', chatId)
@@ -1134,7 +1144,7 @@ export class HistoryHandler {
 
             // 3. Si sigue sin existir, lo creamos
             if (!data) {
-                this.invalidateChatCache(chatId, currentProjectId);
+                this.invalidateChatCache(chatId, currentProjectId, currentServiceId);
                 const isBlacklisted = await this.isContactBlacklisted(chatId, currentProjectId, currentServiceId);
                 const insertData: any = {
                     id: chatId,
@@ -1166,7 +1176,7 @@ export class HistoryHandler {
 
             // Actualizar nombre si es null y ahora tenemos uno
             if (name && !data.name) {
-                this.invalidateChatCache(chatId, currentProjectId);
+                this.invalidateChatCache(chatId, currentProjectId, currentServiceId);
                 let updateQuery = supabase.from('chats')
                     .update({ name })
                     .eq('id', chatId)
@@ -1431,7 +1441,7 @@ export class HistoryHandler {
             }
             await chatUpdateQuery;
 
-            this.invalidateChatCache(chatId, currentProjectId);
+            this.invalidateChatCache(chatId, currentProjectId, currentServiceId);
 
             // Emitir evento para WebSockets (esto actualiza la UI en tiempo real)
             const emittedMessage: any = insertedMsg?.[0] || {};
@@ -1544,6 +1554,26 @@ export class HistoryHandler {
         }
 
         try {
+            let chatExistsQuery = supabase
+                .from('chats')
+                .select('id, service_id')
+                .eq('id', chatId)
+                .eq('project_id', currentProjectId);
+
+            if (currentServiceId) {
+                chatExistsQuery = chatExistsQuery.eq('service_id', currentServiceId);
+            }
+
+            const { data: chatData, error: chatLookupError } = await chatExistsQuery.maybeSingle();
+            if (chatLookupError) {
+                console.error('[HistoryHandler] Error verificando chat antes de limpiar historial:', chatLookupError.message);
+                return false;
+            }
+            if (!chatData) {
+                console.warn(`[HistoryHandler] clearChatHistory no encontro chat para ${chatId} en proyecto ${currentProjectId}, servicio ${currentServiceId}.`);
+                return false;
+            }
+
             // Eliminar todos los mensajes del chat en el proyecto actual
             let deleteQuery = supabase
                 .from('messages')
@@ -1551,7 +1581,7 @@ export class HistoryHandler {
                 .eq('chat_id', chatId)
                 .eq('project_id', currentProjectId);
 
-            if ((forcedServiceId !== undefined && forcedServiceId !== null && currentServiceId) || (currentServiceId && currentServiceId !== 'default_service')) {
+            if (currentServiceId) {
                 deleteQuery = deleteQuery.eq('service_id', currentServiceId);
             }
 
@@ -1562,42 +1592,38 @@ export class HistoryHandler {
                 return false;
             }
 
-            // También reiniciamos unread_count en la tabla chats
+            // Tambien reiniciamos unread_count en la tabla chats
             let chatUpdateQuery = supabase
                 .from('chats')
                 .update({ unread_count: 0 })
                 .eq('id', chatId)
                 .eq('project_id', currentProjectId);
 
-            if ((forcedServiceId !== undefined && forcedServiceId !== null && currentServiceId) || (currentServiceId && currentServiceId !== 'default_service')) {
+            if (currentServiceId) {
                 chatUpdateQuery = chatUpdateQuery.eq('service_id', currentServiceId);
             }
 
-            await chatUpdateQuery;
-
-            this.invalidateChatCache(chatId, currentProjectId);
-
-            let chatDataQuery = supabase
-                .from('chats')
-                .select('service_id')
-                .eq('id', chatId)
-                .eq('project_id', currentProjectId);
-
-            if ((forcedServiceId !== undefined && forcedServiceId !== null && currentServiceId) || (currentServiceId && currentServiceId !== 'default_service')) {
-                chatDataQuery = chatDataQuery.eq('service_id', currentServiceId);
+            const { data: updatedChat, error: chatUpdateError } = await chatUpdateQuery.select('id, service_id');
+            if (chatUpdateError) {
+                console.error('[HistoryHandler] Error reiniciando unread_count al limpiar historial:', chatUpdateError.message);
+                return false;
+            }
+            if (!updatedChat || updatedChat.length === 0) {
+                console.warn(`[HistoryHandler] clearChatHistory no actualizo chat para ${chatId} en proyecto ${currentProjectId}, servicio ${currentServiceId}.`);
+                return false;
             }
 
-            const { data: chatData } = await chatDataQuery.maybeSingle();
+            this.invalidateChatCache(chatId, currentProjectId, currentServiceId);
 
             historyEvents.emit('chat_history_cleared', {
                 chatId,
                 projectId: currentProjectId,
-                serviceId: chatData?.service_id || null,
-                service_id: chatData?.service_id || null
+                serviceId: updatedChat[0]?.service_id || null,
+                service_id: updatedChat[0]?.service_id || null
             });
             return true;
         } catch (err: any) {
-            console.error('[HistoryHandler] Excepción en clearChatHistory:', err.message);
+            console.error('[HistoryHandler] Excepcion en clearChatHistory:', err.message);
             return false;
         }
     }
@@ -1618,7 +1644,7 @@ export class HistoryHandler {
         const currentServiceId = forcedServiceId || this.SERVICE_IDENTIFIER;
 
         // Invalidar cache
-        this.invalidateChatCache(chatId, currentProjectId);
+        this.invalidateChatCache(chatId, currentProjectId, currentServiceId);
 
         try {
             const isBlacklisted = await this.isContactBlacklisted(chatId, currentProjectId, currentServiceId);
@@ -1761,7 +1787,7 @@ export class HistoryHandler {
             const activeId = updatedPhoneId || chatId;
 
             // Invalidar cache
-            this.invalidateChatCache(activeId, currentProjectId);
+            this.invalidateChatCache(activeId, currentProjectId, currentServiceId);
 
             if (Object.keys(chatDetails).length > 0) {
                 let query = supabase
@@ -1809,7 +1835,7 @@ export class HistoryHandler {
                     const syncDetails = { ...chatDetails };
                     delete syncDetails.metadata; // Preservar metadatos individuales
                     if (Object.keys(syncDetails).length > 0) {
-                        this.invalidateChatCache(companionId, currentProjectId);
+                        this.invalidateChatCache(companionId, currentProjectId, currentServiceId);
                         let syncQuery = supabase
                             .from('chats')
                             .update(syncDetails)
@@ -1980,7 +2006,7 @@ export class HistoryHandler {
         const chatId = this.normalizeId(rawChatId);
 
         // Invalidar cache
-        this.invalidateChatCache(chatId, projectId);
+        this.invalidateChatCache(chatId, projectId, HistoryHandler.SERVICE_IDENTIFIER);
 
         try {
             for (const tagName of tagsList) {
@@ -2019,7 +2045,7 @@ export class HistoryHandler {
         const currentServiceId = serviceId || this.SERVICE_IDENTIFIER;
         try {
             // Invalidar cache
-            this.invalidateChatCache(chatId, currentProjectId);
+            this.invalidateChatCache(chatId, currentProjectId, currentServiceId);
 
             // 1. Crear o actualizar el chat (Lead)
             const chatPayload: any = {
@@ -2160,7 +2186,7 @@ export class HistoryHandler {
         }
 
         // Invalidar cache
-        this.invalidateChatCache(chatId, currentProjectId);
+        this.invalidateChatCache(chatId, currentProjectId, currentServiceId);
 
         try {
             // Obtener el chat actual para ver su metadata antes de actualizar
@@ -2608,7 +2634,7 @@ export class HistoryHandler {
         }
         try {
             // Invalidar cache
-            this.invalidateChatCache(chatId, currentProjectId);
+            this.invalidateChatCache(chatId, currentProjectId, currentServiceId);
 
             // Aseguramos que el chat base existe antes de vincular la etiqueta
             // para evitar fallos de clave foránea si el chat no ha sido persistido aún.
@@ -2648,7 +2674,7 @@ export class HistoryHandler {
         }
         try {
             // Invalidar cache
-            this.invalidateChatCache(chatId, currentProjectId);
+            this.invalidateChatCache(chatId, currentProjectId, currentServiceId);
 
             let query = supabase
                 .from('chat_tags')
@@ -2688,7 +2714,7 @@ export class HistoryHandler {
         const currentServiceId = forcedServiceId || this.SERVICE_IDENTIFIER;
 
         // Invalidar cache
-        this.invalidateChatCache(chatId, currentProjectId);
+        this.invalidateChatCache(chatId, currentProjectId, currentServiceId);
 
         try {
             // Primero obtenemos metadata actual
@@ -2774,7 +2800,7 @@ export class HistoryHandler {
                 return false;
             }
 
-            this.invalidateChatCache(chatId, currentProjectId);
+            this.invalidateChatCache(chatId, currentProjectId, currentServiceId);
             return true;
         } catch (err) {
             console.error('[HistoryHandler] Error en clearThreadId:', err);
@@ -3178,7 +3204,7 @@ export class HistoryHandler {
                     });
                 }
 
-                this.invalidateChatCache(activeChatTargetId, currentProjectId);
+                this.invalidateChatCache(activeChatTargetId, currentProjectId, currentServiceId);
 
                 if (ticketUpdate.estado === 'Cerrado') {
                     const isBlacklisted = await this.isContactBlacklisted(activeChatTargetId, currentProjectId, currentServiceId);

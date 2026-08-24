@@ -124,7 +124,38 @@ export const resolveServiceId = (req: any): string | null => {
     return (process.env.SERVICE_ID || process.env.RAILWAY_SERVICE_ID || 'default_service');
 };
 
-// CachÃ© para fotos de perfil (chatId -> {url, timestamp})
+type OperationalScopeResult =
+    | { success: true; projectId: string; serviceId: string }
+    | { success: false; status: number; error: string };
+
+const resolveRuntimeOperationalScope = (req: any, handler = HistoryHandlerClass): OperationalScopeResult => {
+    const runtimeProjectId = handler.PROJECT_IDENTIFIER;
+    const runtimeServiceId = handler.SERVICE_IDENTIFIER;
+    const requestedProjectId = String(req?.body?.projectId || req?.query?.projectId || '').trim();
+    const requestedServiceId = String(req?.body?.serviceId || req?.query?.serviceId || '').trim();
+    const authProjectId = String(req?.auth?.projectId || '').trim();
+    const authServiceId = String(req?.auth?.serviceId || '').trim();
+
+    if (requestedProjectId && requestedProjectId !== runtimeProjectId) {
+        return { success: false, status: 403, error: 'Project scope mismatch' };
+    }
+
+    if (requestedServiceId && requestedServiceId !== runtimeServiceId) {
+        return { success: false, status: 403, error: 'Service scope mismatch' };
+    }
+
+    if (authProjectId && authProjectId !== runtimeProjectId) {
+        return { success: false, status: 403, error: 'Auth project scope mismatch' };
+    }
+
+    if (authServiceId && authServiceId !== runtimeServiceId) {
+        return { success: false, status: 403, error: 'Auth service scope mismatch' };
+    }
+
+    return { success: true, projectId: runtimeProjectId, serviceId: runtimeServiceId };
+};
+
+// Caché para fotos de perfil (chatId -> {url, timestamp})
 const profilePicCache = new Map<string, { url: string, expires: number }>();
 const CACHE_TTL = 1000 * 60 * 60; // 1 hora
 // Negative cache: chatIds sin foto de perfil (evita llamadas repetidas a WhatsApp)
@@ -260,10 +291,12 @@ export const processSendMessage = async (
     file: any,
     replyTo?: string
 ) => {
-    const projectId = req.query.projectId || (req.body && req.body.projectId) || req.headers['x-project-id'] || (req.auth && req.auth.projectId) || null;
-    const currentProjectId = projectId || HistoryHandlerClass.PROJECT_IDENTIFIER;
-    const currentServiceId = resolveServiceId(req) || HistoryHandlerClass.SERVICE_IDENTIFIER;
-    const serviceId = req.query.serviceId || (req.body && req.body.serviceId) || req.headers['x-service-id'] || (req.auth && req.auth.serviceId) || null;
+    const scope = resolveRuntimeOperationalScope(req);
+    if (!scope.success) {
+        const failedScope = scope as { success: false; status: number; error: string };
+        return res.status(failedScope.status).json({ success: false, error: failedScope.error });
+    }
+    const { projectId: currentProjectId, serviceId: currentServiceId } = scope;
     const adapterProvider = getAdapterProvider();
     const depsHistoryHandler = HistoryHandlerClass;
     const openaiMain = await getOpenAI(currentProjectId, currentServiceId);
@@ -300,9 +333,9 @@ export const processSendMessage = async (
         let replyRawPayload: any = null;
         
         // Resolver el serviceId específico de este chat
-        let targetServiceId = serviceId || currentServiceId;
+        let targetServiceId = currentServiceId;
         if (!targetServiceId || targetServiceId === 'default_service') {
-            const chatObj = await depsHistoryHandler.getChat(chatId, currentProjectId);
+            const chatObj = await depsHistoryHandler.getChat(chatId, currentProjectId, currentServiceId);
             if (chatObj && chatObj.service_id) {
                 targetServiceId = chatObj.service_id;
             }
@@ -312,7 +345,7 @@ export const processSendMessage = async (
         // El guardado se movió después del envío para capturar el ID real y evitar duplicados
 
         // 3. Inyectar en thread OpenAI (silencioso)
-        depsHistoryHandler.getThreadId(chatId).then((threadId: string | null) => {
+        depsHistoryHandler.getThreadId(chatId, currentProjectId, targetServiceId).then((threadId: string | null) => {
             if (threadId && (message || file) && openaiMain) {
                 openaiMain.beta.threads.messages.create(threadId, {
                     role: 'assistant',
@@ -473,7 +506,7 @@ const sendJson = (res: any, statusCode: number, data: any) => {
 
 export const processBulkTemplate = async (req: any, res: any) => {
     const depsHistoryHandler = HistoryHandlerClass;
-    const projectId = resolveProjectId(req) || req.query.projectId || (req.body && req.body.projectId) || req.headers['x-project-id'] || (req.auth && req.auth.projectId) || null;
+    const projectId = resolveProjectId(req) || depsHistoryHandler.PROJECT_IDENTIFIER;
     const serviceId = resolveServiceId(req) || depsHistoryHandler.SERVICE_IDENTIFIER;
     const file = (req as any).file;
     const { templateName, languageCode } = req.body;
@@ -903,22 +936,7 @@ export const registerBackofficeRoutes = (app: any) => {
     const depsHistoryHandler = HistoryHandlerClass;
     const groupProvider = getGroupProvider();
 
-    const resolveOperationalScope = (req: any): { success: true; projectId: string; serviceId: string } | { success: false; status: number; error: string } => {
-        const runtimeProjectId = depsHistoryHandler.PROJECT_IDENTIFIER;
-        const runtimeServiceId = depsHistoryHandler.SERVICE_IDENTIFIER;
-        const requestedProjectId = req?.body?.projectId || req?.query?.projectId;
-        const requestedServiceId = req?.body?.serviceId || req?.query?.serviceId;
-
-        if (requestedProjectId && requestedProjectId !== runtimeProjectId) {
-            return { success: false, status: 403, error: 'Project scope mismatch' };
-        }
-
-        if (requestedServiceId && requestedServiceId !== runtimeServiceId) {
-            return { success: false, status: 403, error: 'Service scope mismatch' };
-        }
-
-        return { success: true, projectId: runtimeProjectId, serviceId: runtimeServiceId };
-    };
+    const resolveOperationalScope = (req: any): OperationalScopeResult => resolveRuntimeOperationalScope(req, depsHistoryHandler);
 
     // Middleware to dynamically resolve project and service IDs based on hostname
     app.use(async (req: any, res: any, next: any) => {
@@ -2172,8 +2190,14 @@ export const registerBackofficeRoutes = (app: any) => {
         }
     });
 
-    app.post('/api/backoffice/baileys/start', bodyParser.json(), async (req: any, res: any) => {
+    app.post('/api/backoffice/baileys/start', backofficeAuth, bodyParser.json(), async (req: any, res: any) => {
         const { isGroup, usePairingCode, phoneNumber } = req.body;
+        const scope = resolveOperationalScope(req);
+        if (!scope.success) {
+            const failedScope = scope as { success: false; status: number; error: string };
+            return res.status(failedScope.status).json({ success: false, error: failedScope.error });
+        }
+        const { projectId, serviceId } = scope;
         const adapterIsMeta = isMetaProvider(adapterProvider);
         const targetIsGroup = Boolean(isGroup) || Boolean(adapterIsMeta && groupProvider);
         const provider = targetIsGroup ? groupProvider : adapterProvider;
@@ -2181,8 +2205,8 @@ export const registerBackofficeRoutes = (app: any) => {
             target: targetIsGroup ? 'groups' : 'primary',
             usePairingCode: Boolean(usePairingCode),
             hasPhoneNumber: Boolean(phoneNumber),
-            projectId: req.body?.projectId || null,
-            serviceId: req.body?.serviceId || null
+            projectId,
+            serviceId
         };
         console.log('[BACKOFFICE] Baileys start requested', requestContext);
 
@@ -2191,7 +2215,7 @@ export const registerBackofficeRoutes = (app: any) => {
         }
 
         const { hasActiveSession } = await import('../../providers/provider.manager');
-        const statusObj = await hasActiveSession(adapterProvider, groupProvider, req.body?.projectId || null, req.body?.serviceId || null);
+        const statusObj = await hasActiveSession(adapterProvider, groupProvider, projectId, serviceId);
         const providerStatus = targetIsGroup ? statusObj.group : statusObj.adapter;
         if (providerStatus?.active) {
             console.log('[BACKOFFICE] Baileys start skipped: provider already connected', requestContext);
@@ -2215,7 +2239,7 @@ export const registerBackofficeRoutes = (app: any) => {
             // Configurar timeout de 5 minutos (300000 ms) para frenar si no se escanea
             setTimeout(async () => {
                 try {
-                    const currentStatus = await hasActiveSession(adapterProvider, groupProvider, req.body?.projectId || null, req.body?.serviceId || null);
+                    const currentStatus = await hasActiveSession(adapterProvider, groupProvider, projectId, serviceId);
                     const currentProvStatus = targetIsGroup ? currentStatus.group : currentStatus.adapter;
 
                     if (currentProvStatus && !currentProvStatus.active) {
@@ -3886,8 +3910,12 @@ export const registerBackofficeRoutes = (app: any) => {
     });
 
     app.post('/api/backoffice/whatsapp/sync-ids', backofficeAuth, async (req: any, res: any) => {
-        const projectId = resolveProjectId(req) || (req.query.projectId as string) || process.env.RAILWAY_PROJECT_ID || 'default';
-        const serviceId = resolveServiceId(req) || depsHistoryHandler.SERVICE_IDENTIFIER;
+        const scope = resolveOperationalScope(req);
+        if (!scope.success) {
+            const failedScope = scope as { success: false; status: number; error: string };
+            return res.status(failedScope.status).json({ success: false, error: failedScope.error });
+        }
+        const { projectId, serviceId } = scope;
         console.log(`ðŸ”„ [SYNC-IDS] Iniciando sincronizacion para proyecto: ${projectId}, servicio: ${serviceId}`);
         try {
             const config = await depsHistoryHandler.getMetaOnboardingData(projectId, false, serviceId);
@@ -3941,8 +3969,12 @@ export const registerBackofficeRoutes = (app: any) => {
     });
 
     app.post('/api/backoffice/whatsapp/unlink-meta', backofficeAuth, async (req: any, res: any) => {
-        const projectId = resolveProjectId(req) || req.query.projectId || process.env.RAILWAY_PROJECT_ID || "default";
-        const serviceId = resolveServiceId(req) || depsHistoryHandler.SERVICE_IDENTIFIER;
+        const scope = resolveOperationalScope(req);
+        if (!scope.success) {
+            const failedScope = scope as { success: false; status: number; error: string };
+            return res.status(failedScope.status).json({ success: false, error: failedScope.error });
+        }
+        const { projectId, serviceId } = scope;
         console.log(`ðŸ“¡ [UNLINK-META] Iniciando desvinculaciÃ³n de Meta para Proyecto: ${projectId}, Servicio: ${serviceId}`);
         try {
             // 1. Obtener datos de onboarding actuales de la base de datos
@@ -6644,9 +6676,13 @@ export const processImportExcel = async (req: any, res: any) => {
 
 export const processCreateIndividualContact = async (req: any, res: any) => {
     try {
-        const { rawPhone, name, tagIds, projectId: bodyProjectId } = req.body;
-        const targetProjectId = bodyProjectId || req.query.projectId || resolveProjectId(req) || (HistoryHandlerClass as any).PROJECT_ID || 'default';
-        const targetServiceId = resolveServiceId(req) || (HistoryHandlerClass as any).SERVICE_IDENTIFIER;
+        const { rawPhone, name, tagIds } = req.body;
+        const scope = resolveRuntimeOperationalScope(req);
+        if (!scope.success) {
+            const failedScope = scope as { success: false; status: number; error: string };
+            return res.status(failedScope.status).json({ success: false, error: failedScope.error });
+        }
+        const { projectId: targetProjectId, serviceId: targetServiceId } = scope;
 
         let phone = String(rawPhone || '').replace(/\D/g, '').trim();
         if (!phone) {
@@ -6735,7 +6771,12 @@ export const processCreateIndividualContact = async (req: any, res: any) => {
 export const processDeleteChat = async (req: any, res: any) => {
     try {
         const { chatId } = req.params;
-        const targetProjectId = req.query.projectId || resolveProjectId(req) || (HistoryHandlerClass as any).PROJECT_ID || 'default';
+        const scope = resolveRuntimeOperationalScope(req);
+        if (!scope.success) {
+            const failedScope = scope as { success: false; status: number; error: string };
+            return res.status(failedScope.status).json({ success: false, error: failedScope.error });
+        }
+        const { projectId: targetProjectId, serviceId: targetServiceId } = scope;
 
         if (!chatId) {
             return res.status(400).json({ success: false, error: 'Se requiere el ID del chat a eliminar.' });
@@ -6746,14 +6787,18 @@ export const processDeleteChat = async (req: any, res: any) => {
             return res.status(500).json({ success: false, error: 'Base de datos no disponible.' });
         }
 
-        console.log(`ðŸ—‘ï¸ [DeleteChat] Solicitando eliminaciÃ³n del chat ${chatId} exclusivamente para el proyecto ${targetProjectId}...`);
+        console.log(`ðŸ—‘ï¸ [DeleteChat] Solicitando eliminaciÃ³n del chat ${chatId} exclusivamente para el proyecto ${targetProjectId}, servicio ${targetServiceId}...`);
 
         // 1. Eliminar mensajes pertenecientes Ãºnicamente a este chat y proyecto
-        const { error: msgErr } = await supabase
+        let messagesQuery = supabase
             .from('messages')
             .delete()
             .eq('chat_id', chatId)
             .eq('project_id', targetProjectId);
+        if (targetServiceId) {
+            messagesQuery = messagesQuery.eq('service_id', targetServiceId);
+        }
+        const { error: msgErr } = await messagesQuery;
 
         if (msgErr) {
             console.error('[DeleteChat] Error eliminando mensajes del proyecto:', msgErr.message);
@@ -6761,19 +6806,27 @@ export const processDeleteChat = async (req: any, res: any) => {
 
         // 2. Eliminar tickets asociados a este chat y proyecto
         try {
-            await supabase
+            let ticketsQuery = supabase
                 .from('tickets')
                 .delete()
                 .eq('chat_id', chatId)
                 .eq('project_id', targetProjectId);
+            if (targetServiceId) {
+                ticketsQuery = ticketsQuery.eq('service_id', targetServiceId);
+            }
+            await ticketsQuery;
         } catch (tErr) { /* ignore */ }
 
         // 3. Eliminar chat Ãºnicamente para ESTE project_id (aislamiento estricto por proyecto)
-        const { error: chatErr } = await supabase
+        let chatQuery = supabase
             .from('chats')
             .delete()
             .eq('id', chatId)
             .eq('project_id', targetProjectId);
+        if (targetServiceId) {
+            chatQuery = chatQuery.eq('service_id', targetServiceId);
+        }
+        const { error: chatErr } = await chatQuery;
 
         if (chatErr) {
             console.error('[DeleteChat] Error eliminando registro de chat:', chatErr);
@@ -6786,6 +6839,7 @@ export const processDeleteChat = async (req: any, res: any) => {
             success: true,
             chatId,
             projectId: targetProjectId,
+            serviceId: targetServiceId,
             message: `El chat ha sido eliminado exitosamente de este proyecto.`
         });
     } catch (err: any) {

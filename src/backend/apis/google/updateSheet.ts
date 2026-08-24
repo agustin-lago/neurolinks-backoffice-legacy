@@ -31,6 +31,8 @@ interface SheetProcessResult {
     success: boolean;
     skipped?: boolean;
     tableName?: string;
+    tableSynced?: boolean;
+    vectorStoreSynced?: boolean;
     error?: string;
 }
 
@@ -128,10 +130,13 @@ export async function updateAllSheets(options: { forceRecreate?: boolean; projec
                 result.skipped++;
                 continue;
             }
-            if (sheetResult.success && sheetResult.tableName) {
-                result.succeeded++;
+            if (sheetResult.tableSynced === true && sheetResult.tableName) {
                 result.tables.push(sheetResult.tableName);
                 processedSheets.push({ task, tableName: sheetResult.tableName });
+            }
+
+            if (sheetResult.success && sheetResult.tableName) {
+                result.succeeded++;
                 continue;
             }
 
@@ -242,6 +247,7 @@ async function processSheetById(SHEET_ID: string, projectId: string, serviceId: 
         const SHEET_NAME = sheetTitle;
         const tableName = sanitizeTableName(SHEET_NAME, projectId);
         const TXT_PATH = path.join("temp", `${SHEET_NAME}.json`);
+        let tableSynced = false;
 
         console.log(`Obteniendo datos de Google Sheets: ${SHEET_ID} (${SHEET_NAME})`);
 
@@ -384,16 +390,23 @@ async function processSheetById(SHEET_ID: string, projectId: string, serviceId: 
             } else {
                 console.log(`Datos cargados exitosamente en Supabase tabla '${tableName}'.`);
             }
+            tableSynced = true;
         } else if (!options.skipDb) {
             return { success: false, tableName, error: "No se encontraron credenciales de Supabase." };
         }
 
         const success = await uploadDataToAssistant(TXT_PATH, SHEET_ID, projectId, serviceId);
         if (!success) {
-            return { success: false, tableName, error: `Error al enviar los datos del sheet ${SHEET_ID} al vector store.` };
+            return {
+                success: false,
+                tableName,
+                tableSynced,
+                vectorStoreSynced: false,
+                error: `Error al enviar los datos del sheet ${SHEET_ID} al vector store.`
+            };
         }
 
-        return { success: true, tableName };
+        return { success: true, tableName, tableSynced, vectorStoreSynced: true };
     } catch (error: any) {
         console.error("Error al obtener datos:", error.message);
         return { success: false, error: error?.message || String(error) };

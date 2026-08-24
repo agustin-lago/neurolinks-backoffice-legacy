@@ -986,9 +986,12 @@ window.initConexionView = function () {
             showQrLoading(isGroup ? 'Generando QR de grupos' : 'Generando QR Baileys');
             try {
                 const token = localStorage.getItem('backoffice_token');
-                const res = await fetch(`/api/backoffice/baileys/start?token=${token}`, {
+                const res = await fetch('/api/backoffice/baileys/start', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token || ''}`
+                    },
                     body: JSON.stringify({
                         isGroup,
                         projectId: currentProjectId,
@@ -1034,9 +1037,12 @@ window.initConexionView = function () {
 
             try {
                 const token = localStorage.getItem('backoffice_token');
-                const res = await fetch(`/api/backoffice/baileys/start?token=${token}`, {
+                const res = await fetch('/api/backoffice/baileys/start', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token || ''}`
+                    },
                     body: JSON.stringify({
                         isGroup,
                         usePairingCode: true,
