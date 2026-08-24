@@ -7,13 +7,6 @@ function setAppVh() {
     document.documentElement.style.setProperty('--app-vh', `${h}px`);
 }
 setAppVh();
-window.addEventListener('resize', setAppVh, { passive: true });
-window.addEventListener('orientationchange', setAppVh, { passive: true });
-window.addEventListener('pageshow', setAppVh, { passive: true });
-if (window.visualViewport) {
-    window.visualViewport.addEventListener('resize', setAppVh, { passive: true });
-    window.visualViewport.addEventListener('scroll', setAppVh, { passive: true });
-}
 
 // ===== Autosize helpers (sin estado global de DOM) =====
 let _wcMinH = 45, _wcMaxH = 120, _wcBaseH = 45;
@@ -71,6 +64,13 @@ window.initWebchatView = function () {
     // Calcular alturas desde el DOM actual
     ({ minH: _wcMinH, maxH: _wcMaxH, baseH: _wcBaseH } = _computeHeights(_input));
     setAppVh();
+    _listen(window, 'resize', setAppVh, { passive: true });
+    _listen(window, 'orientationchange', setAppVh, { passive: true });
+    _listen(window, 'pageshow', setAppVh, { passive: true });
+    if (window.visualViewport) {
+        _listen(window.visualViewport, 'resize', setAppVh, { passive: true });
+        _listen(window.visualViewport, 'scroll', setAppVh, { passive: true });
+    }
     _input.style.height = _wcBaseH + 'px';
 
     function _chat() { return document.getElementById('chat'); }
@@ -152,13 +152,11 @@ window.initWebchatView = function () {
         _addMsg(msg, 'user');
         _input.value = '';
         _autosizeSmart(_input);
-        fetch(`/webchat-api?token=${token}`, {
+        fetch('/webchat-api', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 message: msg,
-                projectId: window.railwayProjectId || '',
-                serviceId: window.railwayServiceId || '',
                 clientId: webchatClientId
             })
         }).then(r => {
@@ -172,14 +170,12 @@ window.initWebchatView = function () {
         const icon = type === 'image' ? '🖼️' : type === 'video' ? '📽️' : '📎';
         _addMsg(`${icon} ${filename}`, 'user');
         if (_fileInput) _fileInput.value = '';
-        fetch(`/webchat-api?token=${token}`, {
+        fetch('/webchat-api', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 message: '',
                 file: { base64, name: filename, mime: mimeType, type },
-                projectId: window.railwayProjectId || '',
-                serviceId: window.railwayServiceId || '',
                 clientId: webchatClientId
             })
         }).then(r => r.json())
@@ -319,7 +315,14 @@ window.initWebchatView = function () {
     }).catch(() => {});
 
     // Cargar historial
-    fetch(`/webchat-api/history?token=${encodeURIComponent(token || '')}&clientId=${encodeURIComponent(webchatClientId)}`)
+    const historyParams = new URLSearchParams({
+        clientId: webchatClientId
+    });
+    fetch(`/webchat-api/history?${historyParams.toString()}`, {
+        headers: {
+            'Authorization': `Bearer ${token || ''}`
+        }
+    })
         .then(r => r.json())
         .then(d => {
             if (d.success && d.history && d.history.length > 0) {

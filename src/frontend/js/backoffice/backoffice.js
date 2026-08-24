@@ -4262,20 +4262,22 @@ async function saveIndividualContact() {
     }
 
     try {
-        const activeChat = chats.find(c => c.id === activeChatId);
-        const pId = activeChat?.project_id || '';
+        const targetServiceId = (_isSuperAdminMode && _activeServiceFilter && _activeServiceFilter !== 'all')
+            ? _activeServiceFilter
+            : (window.railwayServiceId || '');
+        const pId = window.railwayProjectId || '';
 
-        const res = await fetch(`/api/backoffice/chats/create-individual?token=${token}&projectId=${pId}`, {
+        const res = await fetch(`/api/backoffice/chats/create-individual?token=${encodeURIComponent(token || '')}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 rawPhone: phoneVal,
                 name: nameVal,
                 tagIds: selectedTagIds,
-                projectId: pId
+                projectId: pId,
+                serviceId: targetServiceId
             })
         });
-
         const data = await res.json();
         if (!res.ok || !data.success) {
             throw new Error(data.error || 'Error al guardar el contacto');
@@ -4318,8 +4320,7 @@ async function deleteActiveChat() {
 
     const activeChat = chats.find(c => c.id === activeChatId);
     const displayName = activeChat?.name || activeChatId;
-    const pId = activeChat?.project_id || '';
-
+    const scopeParams = getActiveChatScopeParams();
     const confirm = await window.swalConfirm(
         '¿Eliminar conversación?',
         `¿Estás seguro de que deseas eliminar permanentemente el chat con "${displayName}" (${activeChatId})?\n\nEsta acción borrará el historial de este contacto únicamente para este proyecto.`,
@@ -4332,10 +4333,9 @@ async function deleteActiveChat() {
     if (btn) btn.disabled = true;
 
     try {
-        const res = await fetch(`/api/backoffice/chats/${encodeURIComponent(activeChatId)}?token=${token}&projectId=${pId}`, {
+        const res = await fetch(`/api/backoffice/chats/${encodeURIComponent(activeChatId)}?token=${encodeURIComponent(token || '')}${scopeParams ? `&${scopeParams}` : ''}`, {
             method: 'DELETE'
         });
-
         const data = await res.json();
         if (!res.ok || !data.success) {
             throw new Error(data.error || 'Error al eliminar la conversación');

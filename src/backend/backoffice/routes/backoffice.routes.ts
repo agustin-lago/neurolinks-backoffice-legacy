@@ -128,6 +128,10 @@ type OperationalScopeResult =
     | { success: true; projectId: string; serviceId: string }
     | { success: false; status: number; error: string };
 
+type DataScopeResult =
+    | { success: true; projectId: string; serviceId: string }
+    | { success: false; status: number; error: string };
+
 const resolveRuntimeOperationalScope = (req: any, handler = HistoryHandlerClass): OperationalScopeResult => {
     const runtimeProjectId = handler.PROJECT_IDENTIFIER;
     const runtimeServiceId = handler.SERVICE_IDENTIFIER;
@@ -153,6 +157,42 @@ const resolveRuntimeOperationalScope = (req: any, handler = HistoryHandlerClass)
     }
 
     return { success: true, projectId: runtimeProjectId, serviceId: runtimeServiceId };
+};
+
+const resolveAuthorizedDataScope = async (req: any, handler = HistoryHandlerClass): Promise<DataScopeResult> => {
+    const runtimeProjectId = handler.PROJECT_IDENTIFIER;
+    const runtimeServiceId = handler.SERVICE_IDENTIFIER;
+    const requestedProjectId = String(req?.body?.projectId || req?.query?.projectId || req?.headers?.['x-project-id'] || '').trim();
+    const requestedServiceId = String(req?.body?.serviceId || req?.query?.serviceId || req?.headers?.['x-service-id'] || '').trim();
+    const authProjectId = String(req?.auth?.projectId || '').trim();
+    const authServiceId = String(req?.auth?.serviceId || '').trim();
+
+    if (requestedProjectId && requestedProjectId !== runtimeProjectId) {
+        return { success: false, status: 403, error: 'Project scope mismatch' };
+    }
+
+    if (authProjectId && authProjectId !== runtimeProjectId) {
+        return { success: false, status: 403, error: 'Auth project scope mismatch' };
+    }
+
+    if (req?.auth?.isSubUser === true) {
+        const subuserServiceId = authServiceId || runtimeServiceId;
+        if (requestedServiceId && requestedServiceId !== subuserServiceId) {
+            return { success: false, status: 403, error: 'Service scope mismatch' };
+        }
+        return { success: true, projectId: runtimeProjectId, serviceId: subuserServiceId };
+    }
+
+    let targetServiceId = runtimeServiceId;
+    if (requestedServiceId && requestedServiceId !== runtimeServiceId) {
+        const visibleServices = await getVisibleServiceIds(runtimeProjectId, runtimeServiceId);
+        if (!visibleServices.includes(requestedServiceId)) {
+            return { success: false, status: 403, error: 'Service scope mismatch' };
+        }
+        targetServiceId = requestedServiceId;
+    }
+
+    return { success: true, projectId: runtimeProjectId, serviceId: targetServiceId };
 };
 
 // Caché para fotos de perfil (chatId -> {url, timestamp})
@@ -291,7 +331,7 @@ export const processSendMessage = async (
     file: any,
     replyTo?: string
 ) => {
-    const scope = resolveRuntimeOperationalScope(req);
+    const scope = await resolveAuthorizedDataScope(req);
     if (!scope.success) {
         const failedScope = scope as { success: false; status: number; error: string };
         return res.status(failedScope.status).json({ success: false, error: failedScope.error });
@@ -299,7 +339,6 @@ export const processSendMessage = async (
     const { projectId: currentProjectId, serviceId: currentServiceId } = scope;
     const adapterProvider = getAdapterProvider();
     const depsHistoryHandler = HistoryHandlerClass;
-    const openaiMain = await getOpenAI(currentProjectId, currentServiceId);
     const groupProvider = getGroupProvider();
     // 1. Determinar tipo y contenido
     let finalType: 'text' | 'image' | 'video' | 'document' | 'sticker' | 'audio' = 'text';
@@ -341,6 +380,7 @@ export const processSendMessage = async (
             }
         }
         if (!targetServiceId) targetServiceId = 'default_service';
+        const openaiMain = await getOpenAI(currentProjectId, targetServiceId);
 
         // El guardado se movió después del envío para capturar el ID real y evitar duplicados
 
@@ -6677,7 +6717,7 @@ export const processImportExcel = async (req: any, res: any) => {
 export const processCreateIndividualContact = async (req: any, res: any) => {
     try {
         const { rawPhone, name, tagIds } = req.body;
-        const scope = resolveRuntimeOperationalScope(req);
+        const scope = await resolveAuthorizedDataScope(req);
         if (!scope.success) {
             const failedScope = scope as { success: false; status: number; error: string };
             return res.status(failedScope.status).json({ success: false, error: failedScope.error });
@@ -6771,7 +6811,7 @@ export const processCreateIndividualContact = async (req: any, res: any) => {
 export const processDeleteChat = async (req: any, res: any) => {
     try {
         const { chatId } = req.params;
-        const scope = resolveRuntimeOperationalScope(req);
+        const scope = await resolveAuthorizedDataScope(req);
         if (!scope.success) {
             const failedScope = scope as { success: false; status: number; error: string };
             return res.status(failedScope.status).json({ success: false, error: failedScope.error });
@@ -6790,14 +6830,12 @@ export const processDeleteChat = async (req: any, res: any) => {
         console.log(`ðŸ—‘ï¸ [DeleteChat] Solicitando eliminaciÃ³n del chat ${chatId} exclusivamente para el proyecto ${targetProjectId}, servicio ${targetServiceId}...`);
 
         // 1. Eliminar mensajes pertenecientes Ãºnicamente a este chat y proyecto
-        let messagesQuery = supabase
+        const messagesQuery = supabase
             .from('messages')
             .delete()
             .eq('chat_id', chatId)
-            .eq('project_id', targetProjectId);
-        if (targetServiceId) {
-            messagesQuery = messagesQuery.eq('service_id', targetServiceId);
-        }
+            .eq('project_id', targetProjectId)
+            .eq('service_id', targetServiceId);
         const { error: msgErr } = await messagesQuery;
 
         if (msgErr) {
@@ -6806,31 +6844,32 @@ export const processDeleteChat = async (req: any, res: any) => {
 
         // 2. Eliminar tickets asociados a este chat y proyecto
         try {
-            let ticketsQuery = supabase
+            const ticketsQuery = supabase
                 .from('tickets')
                 .delete()
                 .eq('chat_id', chatId)
-                .eq('project_id', targetProjectId);
-            if (targetServiceId) {
-                ticketsQuery = ticketsQuery.eq('service_id', targetServiceId);
-            }
+                .eq('project_id', targetProjectId)
+                .eq('service_id', targetServiceId);
             await ticketsQuery;
         } catch (tErr) { /* ignore */ }
 
-        // 3. Eliminar chat Ãºnicamente para ESTE project_id (aislamiento estricto por proyecto)
-        let chatQuery = supabase
+        // 3. Eliminar chat únicamente para ESTE project_id y service_id
+        const chatQuery = supabase
             .from('chats')
             .delete()
             .eq('id', chatId)
-            .eq('project_id', targetProjectId);
-        if (targetServiceId) {
-            chatQuery = chatQuery.eq('service_id', targetServiceId);
-        }
-        const { error: chatErr } = await chatQuery;
+            .eq('project_id', targetProjectId)
+            .eq('service_id', targetServiceId)
+            .select('id');
+        const { data: deletedChats, error: chatErr } = await chatQuery;
 
         if (chatErr) {
             console.error('[DeleteChat] Error eliminando registro de chat:', chatErr);
             return res.status(500).json({ success: false, error: chatErr.message });
+        }
+
+        if (!deletedChats || deletedChats.length === 0) {
+            return res.status(404).json({ success: false, error: 'Chat no encontrado en el proyecto/servicio solicitado.' });
         }
 
         console.log(`âœ… [DeleteChat] Chat ${chatId} borrado con Ã©xito del proyecto ${targetProjectId}.`);

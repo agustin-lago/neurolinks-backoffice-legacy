@@ -72,6 +72,8 @@ window.backofficeView = {
                 </div>
                 <div id="chat-header" style="display: none;">
                     <button class="mobile-back-btn" onclick="typeof window.backofficeCloseMobileChat === 'function' ? window.backofficeCloseMobileChat() : document.body.classList.remove('mobile-chat-active')" aria-label="Volver">
+                        <i class="fas fa-arrow-left"></i>
+                    </button>
                     <div class="header-user">
                         <div class="chat-avatar" id="active-chat-avatar"></div>
                         <div>

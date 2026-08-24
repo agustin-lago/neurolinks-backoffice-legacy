@@ -266,8 +266,8 @@ export const registerWebchatRoutes = (app: any) => {
             }
 
             const { HistoryHandler } = await import("../../../db/historyHandler");
-            const projectId = String(req.body?.projectId || req.query?.projectId || process.env.RAILWAY_PROJECT_ID || HistoryHandler.PROJECT_IDENTIFIER || '').trim();
-            const serviceId = String(req.body?.serviceId || req.query?.serviceId || process.env.RAILWAY_SERVICE_ID || HistoryHandler.SERVICE_IDENTIFIER || '').trim();
+            const projectId = HistoryHandler.PROJECT_IDENTIFIER;
+            const serviceId = HistoryHandler.SERVICE_IDENTIFIER;
             const session = webChatManager.getSession(ip);
             let replyText = '';
 
