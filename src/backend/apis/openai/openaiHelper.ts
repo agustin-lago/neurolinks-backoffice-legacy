@@ -4,7 +4,7 @@ import { executeDbQuery } from "../../db/dbHandler";
 import { SystemLogger } from "../../utils/logger.js";
 import { RagToolManager } from "../../rag/ragToolManager.js";
 
-// Instancias perezosas para Hot-update con caché multi-tenant
+// Instancias perezosas para Hot-update con cache por project_id/service_id
 const _openaiMap = new Map<string, OpenAI>();
 const _openaiVisionMap = new Map<string, OpenAI>();
 

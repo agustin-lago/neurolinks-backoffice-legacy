@@ -13,7 +13,7 @@ sequenceDiagram
     participant API as API Bot-RialWay (/api/v1)
     actor Cliente as Cliente Final
     participant Meta as Meta Facebook SDK
-    participant DB as Base de Datos (Multi-Tenant)
+    participant DB as Base de Datos (Project/Service)
 
     TuPlataforma->>API: POST /api/v1/meta/connect-session (con x-api-key)
     API-->>TuPlataforma: { "onboarding_url": "https://tu-dominio.com/onboard/meta?session=..." }
@@ -21,7 +21,7 @@ sequenceDiagram
     Cliente->>Meta: Inicia sesión y autoriza su número en WhatsApp
     Meta-->>API: Entrega código de autorización OAuth
     API->>Meta: Intercambia Token y Suscribe Webhooks automáticos
-    API->>DB: Guarda credenciales asociadas al tenant/servicio
+    API->>DB: Guarda credenciales asociadas al project_id/service_id
     API-->>Cliente: Muestra confirmación de éxito ("¡WhatsApp Conectado!")
 ```
 
@@ -227,5 +227,5 @@ curl -X POST https://tu-dominio.com/api/v1/meta/connect-session \
 Una vez que el usuario final autoriza su número en el popup de Meta:
 1. **Intercambio seguro de tokens**: El backend intercambia automáticamente el código OAuth temporal por un *Access Token de Larga Duración* (permanente).
 2. **Suscripción de Webhooks**: Se suscribe la cuenta comercial (WABA) a los eventos `messages` y `smb_message_echoes` (para sincronizar mensajes entrantes y respuestas manuales).
-3. **Persistencia Multi-Tenant**: Las credenciales (`waba_id`, `phone_number_id`, `access_token`) se guardan aisladas en Supabase bajo el `project_id` y `service_id` correspondiente.
+3. **Persistencia por project_id/service_id**: Las credenciales (`waba_id`, `phone_number_id`, `access_token`) se guardan aisladas en Supabase bajo el `project_id` y `service_id` correspondiente.
 4. **Activación Inmediata**: El motor de mensajería queda operativo y listo para recibir y enviar mensajes y plantillas mediante las APIs de RialWay.

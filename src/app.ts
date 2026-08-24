@@ -536,7 +536,7 @@ const main = async () => {
                 await deleteAllProjectSessionsFromDb();
 
                 // 2. Detener los proveedores y limpiar su memoria para que no re-guarden
-                // credenciales o sesiones pertenecientes al tenant anterior.
+                // credenciales o sesiones pertenecientes a la configuracion anterior.
                 const providers = [adapterProvider, groupProvider];
 
                 for (const provider of providers) {
@@ -573,13 +573,13 @@ const main = async () => {
                     }
 
                     // Meta Cloud API: eliminar access_token, phone_number_id y waba_id
-                    // pertenecientes al tenant anterior.
-                    if (typeof provider.clearTenantConfig === 'function') {
+                    // pertenecientes a la configuracion anterior.
+                    if (typeof provider.clearMetaCredentials === 'function') {
                         console.log(
-                            '[API] Invalidando credenciales Meta del tenant actual en memoria...'
+                            '[API] Invalidando credenciales Meta actuales en memoria...'
                         );
 
-                        provider.clearTenantConfig();
+                        provider.clearMetaCredentials();
                     }
                 }
 

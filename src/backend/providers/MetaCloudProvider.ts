@@ -31,11 +31,11 @@ class MetaCloudProvider extends ProviderClass {
     }
 
     /**
-     * Elimina de memoria las credenciales Meta pertenecientes al tenant actual.
-     * Se utiliza durante UNLINK para impedir que un tenant nuevo herede
-     * access_token / phone_number_id / waba_id del tenant anterior.
+     * Elimina de memoria las credenciales Meta del proyecto/servicio actual.
+     * Se utiliza durante UNLINK para impedir que una configuracion nueva herede
+     * access_token / phone_number_id / waba_id anteriores.
      */
-    public clearTenantConfig() {
+    public clearMetaCredentials() {
         this.config = {
             ...this.config,
             access_token: null,
@@ -49,7 +49,7 @@ class MetaCloudProvider extends ProviderClass {
         this.globalVendorArgs = this.config;
 
         console.log(
-            '🧹 [MetaCloudProvider] Credenciales tenant de Meta eliminadas de memoria.'
+            '🧹 [MetaCloudProvider] Credenciales Meta eliminadas de memoria.'
         );
     }
 
@@ -65,7 +65,7 @@ class MetaCloudProvider extends ProviderClass {
      * Descarga y guarda archivos multimedia recibidos por webhook
      */
     public async saveFile(ctx: any, options: { path?: string } = {}): Promise<string> {
-        // Intentar obtener el token del tenant específico para este mensaje
+        // Intentar obtener el token del proyecto/servicio correspondiente para este mensaje
         let access_token = this.config.access_token;
         const recipientPhoneId = ctx.recipientPhoneId;
         if (recipientPhoneId) {
@@ -74,9 +74,9 @@ class MetaCloudProvider extends ProviderClass {
                 const resolvedProjectId = await HistoryHandler.getProjectIdByRecipient(recipientPhoneId);
                 const resolvedServiceId = await HistoryHandler.getServiceIdByRecipient(recipientPhoneId);
                 if (resolvedProjectId) {
-                    const tenantOnboarding = await HistoryHandler.getMetaOnboardingData(resolvedProjectId, false, resolvedServiceId);
-                    if (tenantOnboarding?.whatsappToken) {
-                        access_token = tenantOnboarding.whatsappToken;
+                    const serviceOnboarding = await HistoryHandler.getMetaOnboardingData(resolvedProjectId, false, resolvedServiceId);
+                    if (serviceOnboarding?.whatsappToken) {
+                        access_token = serviceOnboarding.whatsappToken;
                     }
                 }
             } catch (e) {
@@ -367,7 +367,7 @@ class MetaCloudProvider extends ProviderClass {
     /**
      * Envía un mensaje basado en una plantilla oficial
      */
-    private async resolveTenantSendConfig(number: string, options: any = {}) {
+    private async resolveProjectServiceSendConfig(number: string, options: any = {}) {
         let phone_number_id = this.config.phone_number_id || this.config.numberId;
         let access_token = this.config.access_token || this.config.jwtToken;
         let waba_id = this.config.waba_id || this.config.businessId;
@@ -395,17 +395,17 @@ class MetaCloudProvider extends ProviderClass {
                 }
             }
 
-            const canUseTenantConfig = targetServiceId && targetServiceId !== 'default' && targetServiceId !== 'default_service';
-            if (canUseTenantConfig) {
-                const tenantOnboarding = await HistoryHandler.getMetaOnboardingData(targetProjectId, false, targetServiceId);
-                const tenantToken = tenantOnboarding?.whatsappToken || tenantOnboarding?.access_token;
-                const tenantPhoneId = tenantOnboarding?.phoneNumberId || tenantOnboarding?.whatsappNumberId || tenantOnboarding?.phone_number_id;
-                const tenantWabaId = tenantOnboarding?.whatsappBusinessId || tenantOnboarding?.waba_id;
+            const canUseServiceConfig = targetServiceId && targetServiceId !== 'default' && targetServiceId !== 'default_service';
+            if (canUseServiceConfig) {
+                const serviceOnboarding = await HistoryHandler.getMetaOnboardingData(targetProjectId, false, targetServiceId);
+                const serviceToken = serviceOnboarding?.whatsappToken || serviceOnboarding?.access_token;
+                const servicePhoneId = serviceOnboarding?.phoneNumberId || serviceOnboarding?.whatsappNumberId || serviceOnboarding?.phone_number_id;
+                const serviceWabaId = serviceOnboarding?.whatsappBusinessId || serviceOnboarding?.waba_id;
 
-                if (tenantToken && tenantPhoneId && tenantToken !== 'PENDING' && tenantPhoneId !== 'PENDING') {
-                    access_token = tenantToken;
-                    phone_number_id = tenantPhoneId;
-                    waba_id = tenantWabaId || waba_id;
+                if (serviceToken && servicePhoneId && serviceToken !== 'PENDING' && servicePhoneId !== 'PENDING') {
+                    access_token = serviceToken;
+                    phone_number_id = servicePhoneId;
+                    waba_id = serviceWabaId || waba_id;
                 }
             }
 
@@ -429,7 +429,7 @@ class MetaCloudProvider extends ProviderClass {
     }
 
     public async sendTemplate(number: string, templateName: string, languageCode: string = 'es', components: any[] = [], options: any = {}): Promise<any> {
-        const sendConfig = await this.resolveTenantSendConfig(number, options);
+        const sendConfig = await this.resolveProjectServiceSendConfig(number, options);
         const { phone_number_id, access_token } = sendConfig;
         const sendOptions = { ...options, projectId: sendConfig.projectId, serviceId: sendConfig.serviceId, metaPhoneNumberId: phone_number_id };
         if (!phone_number_id || !access_token) {
@@ -744,7 +744,7 @@ class MetaCloudProvider extends ProviderClass {
      * Envía mensajes a través de la API oficial de Meta
      */
     public async sendMessage(number: string, message: string, options: any = {}): Promise<any> {
-        const sendConfig = await this.resolveTenantSendConfig(number, options);
+        const sendConfig = await this.resolveProjectServiceSendConfig(number, options);
         const phone_number_id = sendConfig.phone_number_id;
         const access_token = sendConfig.access_token;
         const sendOptions = { ...options, projectId: sendConfig.projectId, serviceId: sendConfig.serviceId, metaPhoneNumberId: phone_number_id };
@@ -1139,7 +1139,7 @@ class MetaCloudProvider extends ProviderClass {
                     if (messages && Array.isArray(messages)) {
 
                         // Filtro de número destino para asegurar que es para nosotros
-                        // En entorno multitenant cada instancia de Railway debe procesar ÚNICAMENTE sus propios mensajes
+                        // Cada instancia/servicio de Railway debe procesar únicamente los mensajes correspondientes a su project_id/service_id
                         let isValidPhoneId = false;
                         if (value.metadata?.phone_number_id) {
                             const incomingPhoneId = String(value.metadata.phone_number_id);

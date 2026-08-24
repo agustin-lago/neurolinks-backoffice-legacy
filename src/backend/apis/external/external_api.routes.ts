@@ -109,7 +109,7 @@ export const registerExternalApiRoutes = (app: any, deps: any) => {
                 return res.status(400).json({ success: false, error: "Falta api_key en la solicitud" });
             }
 
-            // Validar la API KEY contra la base de datos (tabla settings) buscando el tenant correspondiente
+            // Validar la API KEY contra settings y resolver project_id/service_id
             const { data: settingData, error: settingError } = await supabase
                 .from('settings')
                 .select('project_id, service_id')
@@ -1024,7 +1024,7 @@ export const registerExternalApiRoutes = (app: any, deps: any) => {
                 }
             }
 
-            // Guardar credenciales en Supabase de forma multi-tenant
+            // Guardar credenciales en Supabase para el project_id/service_id correspondiente
             await HistoryHandler.saveMetaOnboardingData(
                 finalWabaId,
                 finalPhoneId,
@@ -1052,7 +1052,7 @@ export const registerExternalApiRoutes = (app: any, deps: any) => {
 
     /**
      * GET /api/v1/meta/status (y POST /api/v1/meta/status)
-     * Consulta el estado actual de la conexión de WhatsApp Business para este tenant.
+     * Consulta el estado actual de la conexión de WhatsApp Business para este project_id/service_id.
      */
     const handleMetaStatus = async (req: any, res: any) => {
         try {

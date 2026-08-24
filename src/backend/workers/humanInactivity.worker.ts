@@ -6,7 +6,7 @@ import { HistoryHandler, supabase } from "../db/historyHandler";
  * Excluye contactos en lista negra (sin_bot o bloqueado_crm) que deben permanecer en atención humana.
  */
 export const startHumanInactivityWorker = (timeoutMinutes = 30) => {
-    console.log(`🤖 [Worker] Iniciando worker de inactividad humana multitenant (${timeoutMinutes} min)...`);
+    console.log(`🤖 [Worker] Iniciando worker de inactividad humana por project_id/service_id (${timeoutMinutes} min)...`);
 
     setInterval(async () => {
         try {
@@ -88,7 +88,7 @@ export const startHumanInactivityWorker = (timeoutMinutes = 30) => {
                 }
 
                 if (!isGlobalBotEnabled) {
-                    continue; // Saltar si el bot está desactivado globalmente para este inquilino/servicio
+                    continue; // Saltar si el bot está desactivado globalmente para este project_id/service_id
                 }
 
                 // 4. Filtrar lista negra usando el Set en memoria

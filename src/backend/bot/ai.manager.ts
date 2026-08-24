@@ -122,7 +122,7 @@ export class AiManager {
     }
 
     public processUserMessage = async (ctx: any, { flowDynamic, state, provider, gotoFlow }: any) => {
-        // Ruteo Multitenant Dinámico
+        // Ruteo dinamico por project_id/service_id
         const botPhoneNumber = provider?.globalVendorArgs?.phone_number_id || (ctx.to ? ctx.to.replace(/\D/g, '') : null);
         const dynamicProjectId = await HistoryHandler.getProjectIdByRecipient(botPhoneNumber) || HistoryHandler.PROJECT_IDENTIFIER;
         const dynamicServiceId = await HistoryHandler.getServiceIdByRecipient(botPhoneNumber) || HistoryHandler.SERVICE_IDENTIFIER;

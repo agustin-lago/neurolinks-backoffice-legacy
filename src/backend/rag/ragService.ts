@@ -115,7 +115,7 @@ export async function indexDocumentForRAG(projectId: string, fileId: string, fil
             return false;
         }
 
-        // Eliminar fragmentos anteriores del mismo fileId / projectId / serviceId (multi-tenant & multi-service check)
+        // Eliminar fragmentos anteriores del mismo fileId / projectId / serviceId
         let deleteQuery = supabase
             .from('knowledge_chunks')
             .delete()
