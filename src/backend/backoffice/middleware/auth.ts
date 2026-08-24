@@ -178,13 +178,20 @@ export const backofficeAuth = async (req: any, res: any, next: () => void) => {
     
     // 6. Solo entonces: isValid = true
     if (token && isValid) {
+        const authProjectId = isSuperAdmin
+            ? null
+            : (isSubUser ? (userProjectId || projectId) : projectId);
+        const authServiceId = isSuperAdmin
+            ? null
+            : (isSubUser ? (userServiceId || currentServiceId) : currentServiceId);
+
         req.auth = {
             isAdmin: !isSubUser || userRole === 'admin',
             isSuperAdmin,
             isSubUser,
             userId,
-            projectId: userProjectId,
-            serviceId: userServiceId
+            projectId: authProjectId,
+            serviceId: authServiceId
         };
         return next();
     }

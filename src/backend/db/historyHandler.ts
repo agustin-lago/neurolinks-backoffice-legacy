@@ -779,36 +779,38 @@ export class HistoryHandler {
         return Array.from(new Set(list)).filter(Boolean);
     }
 
-    static async getClientContext(rawChatId: string): Promise<any | null> {
+    static async getClientContext(rawChatId: string, forcedProjectId?: string, forcedServiceId?: string | null): Promise<any | null> {
         const chatId = this.normalizeId(rawChatId);
+        const currentProjectId = forcedProjectId || this.PROJECT_IDENTIFIER;
+        const currentServiceId = forcedServiceId || this.SERVICE_IDENTIFIER;
         if (process.env.STORAGE_MODE === "local") {
-            const chat = await LocalHistoryStore.getChat(chatId, this.PROJECT_IDENTIFIER);
+            const chat = await LocalHistoryStore.getChat(chatId, currentProjectId);
             if (!chat) return null;
             const meta = chat.metadata || {};
             return {
                 nombre: chat.name || meta.nombre,
                 direccion: meta.direccion,
-                email: meta.email,
-                dni_cuit: meta.dni_cuit,
-                tax_status: meta.tax_status,
-                offered_product: meta.offered_product,
+                email: chat.email || meta.email,
+                dni_cuit: (chat as any).cuit_dni || meta.dni_cuit,
+                tax_status: (chat as any).tax_status || meta.tax_status,
+                offered_product: (chat as any).offered_product || meta.offered_product,
                 tipoCliente: meta.tipoCliente,
                 incidencias_ids: meta.incidencias_ids || []
             };
         }
 
         try {
-            const chat = await this.getChat(chatId);
+            const chat = await this.getChat(chatId, currentProjectId, currentServiceId || undefined);
             if (!chat) return null;
 
             const meta = chat.metadata || {};
             return {
                 nombre: chat.name || meta.nombre,
-                direccion: meta.direccion,
-                email: meta.email,
-                dni_cuit: meta.dni_cuit,
-                tax_status: meta.tax_status,
-                offered_product: meta.offered_product,
+                direccion: (chat as any).address || meta.direccion,
+                email: chat.email || meta.email,
+                dni_cuit: (chat as any).cuit_dni || meta.dni_cuit,
+                tax_status: (chat as any).tax_status || meta.tax_status,
+                offered_product: (chat as any).offered_product || meta.offered_product,
                 tipoCliente: meta.tipoCliente,
                 incidencias_ids: meta.incidencias_ids || []
             };
@@ -817,11 +819,13 @@ export class HistoryHandler {
         }
     }
 
-    static async saveClientContext(rawChatId: string, contextData: any) {
+    static async saveClientContext(rawChatId: string, contextData: any, forcedProjectId?: string, forcedServiceId?: string | null) {
         const chatId = this.normalizeId(rawChatId);
+        const currentProjectId = forcedProjectId || this.PROJECT_IDENTIFIER;
+        const currentServiceId = forcedServiceId || this.SERVICE_IDENTIFIER;
 
         if (process.env.STORAGE_MODE === "local") {
-            const chat = await LocalHistoryStore.getChat(chatId, this.PROJECT_IDENTIFIER);
+            const chat = await LocalHistoryStore.getChat(chatId, currentProjectId);
             const currentMeta = chat?.metadata || {};
             const updatedMeta = {
                 ...currentMeta,
@@ -834,18 +838,16 @@ export class HistoryHandler {
                 tipoCliente: contextData.tipoCliente || contextData.tipo_cliente || currentMeta.tipoCliente,
                 incidencias_ids: contextData.incidencias_ids || currentMeta.incidencias_ids || []
             };
-            const updatePayload: any = {
-                metadata: updatedMeta
-            };
+            const updatePayload: any = { metadata: updatedMeta };
             if (contextData.nombre) {
                 updatePayload.name = contextData.nombre;
             }
-            await LocalHistoryStore.updateContactDetails(chatId, updatePayload, this.PROJECT_IDENTIFIER);
+            await LocalHistoryStore.updateContactDetails(chatId, updatePayload, currentProjectId);
             return;
         }
 
         try {
-            const chat = await this.getChat(chatId);
+            const chat = await this.getChat(chatId, currentProjectId, currentServiceId || undefined);
             const currentMeta = chat?.metadata || {};
             const updatedMeta = {
                 ...currentMeta,
@@ -859,25 +861,113 @@ export class HistoryHandler {
                 incidencias_ids: contextData.incidencias_ids || currentMeta.incidencias_ids || []
             };
 
-            const updatePayload: any = {
-                metadata: updatedMeta
-            };
+            const updatePayload: any = { metadata: updatedMeta };
             if (contextData.nombre) {
                 updatePayload.name = contextData.nombre;
             }
 
-            this.invalidateChatCache(chatId, this.PROJECT_IDENTIFIER);
-
-            await supabase
+            this.invalidateChatCache(chatId, currentProjectId);
+            let query = supabase
                 .from('chats')
                 .update(updatePayload)
                 .eq('id', chatId)
-                .eq('project_id', this.PROJECT_IDENTIFIER);
+                .eq('project_id', currentProjectId);
+            if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                query = query.eq('service_id', currentServiceId);
+            }
+            await query;
         } catch (err) {
             console.error('[HistoryHandler] Error en saveClientContext:', err);
         }
     }
 
+    static async clearClientContext(rawChatId: string, forcedProjectId?: string, forcedServiceId?: string | null): Promise<boolean> {
+        const chatId = this.normalizeId(rawChatId);
+        const currentProjectId = forcedProjectId || this.PROJECT_IDENTIFIER;
+        const currentServiceId = forcedServiceId || this.SERVICE_IDENTIFIER;
+        const contextKeys = [
+            'nombre',
+            'apellido',
+            'direccion',
+            'address',
+            'email',
+            'dni_cuit',
+            'numCliente',
+            'cuit_dni',
+            'tax_status',
+            'offered_product',
+            'tipoCliente',
+            'tipo_cliente',
+            'incidencias_ids',
+            'esCliente'
+        ];
+
+        if (process.env.STORAGE_MODE === "local") {
+            const chat = await LocalHistoryStore.getChat(chatId, currentProjectId);
+            if (!chat) return true;
+            const metadata = { ...(chat.metadata || {}) };
+            for (const key of contextKeys) delete metadata[key];
+            return LocalHistoryStore.updateContactDetails(chatId, {
+                name: null,
+                email: null,
+                metadata,
+                cuit_dni: null,
+                tax_status: null,
+                address: null,
+                offered_product: null,
+                last_db_result: null
+            } as any, currentProjectId);
+        }
+
+        try {
+            let selectQuery = supabase
+                .from('chats')
+                .select('metadata')
+                .eq('id', chatId)
+                .eq('project_id', currentProjectId);
+            if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                selectQuery = selectQuery.eq('service_id', currentServiceId);
+            }
+
+            const { data } = await selectQuery.maybeSingle();
+            const metadata = { ...(data?.metadata || {}) };
+            for (const key of contextKeys) delete metadata[key];
+
+            const updatePayload: any = {
+                name: null,
+                email: null,
+                metadata,
+                cuit_dni: null,
+                tax_status: null,
+                address: null,
+                offered_product: null,
+                last_db_result: null
+            };
+
+            let updateQuery = supabase
+                .from('chats')
+                .update(updatePayload)
+                .eq('id', chatId)
+                .eq('project_id', currentProjectId);
+            if (currentServiceId) {
+                updateQuery = updateQuery.eq('service_id', currentServiceId);
+            }
+
+            const { error } = await updateQuery;
+            if (error) throw error;
+            this.invalidateChatCache(chatId, currentProjectId);
+            historyEvents.emit('contact_updated', {
+                chatId,
+                project_id: currentProjectId,
+                service_id: currentServiceId,
+                details: updatePayload
+            });
+            return true;
+        } catch (err) {
+            console.error('[HistoryHandler] Error en clearClientContext:', err);
+            return false;
+        }
+    }
     /**
      * Obtiene los detalles completos de un chat, incluyendo etiquetas
      */
@@ -1461,7 +1551,7 @@ export class HistoryHandler {
                 .eq('chat_id', chatId)
                 .eq('project_id', currentProjectId);
 
-            if (currentServiceId && currentServiceId !== 'default_service') {
+            if ((forcedServiceId !== undefined && forcedServiceId !== null && currentServiceId) || (currentServiceId && currentServiceId !== 'default_service')) {
                 deleteQuery = deleteQuery.eq('service_id', currentServiceId);
             }
 
@@ -1479,7 +1569,7 @@ export class HistoryHandler {
                 .eq('id', chatId)
                 .eq('project_id', currentProjectId);
 
-            if (currentServiceId && currentServiceId !== 'default_service') {
+            if ((forcedServiceId !== undefined && forcedServiceId !== null && currentServiceId) || (currentServiceId && currentServiceId !== 'default_service')) {
                 chatUpdateQuery = chatUpdateQuery.eq('service_id', currentServiceId);
             }
 
@@ -1493,7 +1583,7 @@ export class HistoryHandler {
                 .eq('id', chatId)
                 .eq('project_id', currentProjectId);
 
-            if (currentServiceId && currentServiceId !== 'default_service') {
+            if ((forcedServiceId !== undefined && forcedServiceId !== null && currentServiceId) || (currentServiceId && currentServiceId !== 'default_service')) {
                 chatDataQuery = chatDataQuery.eq('service_id', currentServiceId);
             }
 
@@ -1522,7 +1612,7 @@ export class HistoryHandler {
         }
     }
 
-    static async setAssignedAgent(rawChatId: string, agentName: string, forcedProjectId?: string, forcedServiceId?: string) {
+    static async setAssignedAgent(rawChatId: string, agentName: string, forcedProjectId?: string, forcedServiceId?: string): Promise<boolean> {
         const chatId = this.normalizeId(rawChatId);
         const currentProjectId = forcedProjectId || this.PROJECT_IDENTIFIER;
         const currentServiceId = forcedServiceId || this.SERVICE_IDENTIFIER;
@@ -1547,11 +1637,19 @@ export class HistoryHandler {
                 .eq('id', chatId)
                 .eq('project_id', currentProjectId);
 
-            if (currentServiceId && currentServiceId !== 'default_service') {
+            if ((forcedServiceId !== undefined && forcedServiceId !== null && currentServiceId) || (currentServiceId && currentServiceId !== 'default_service')) {
                 query = query.eq('service_id', currentServiceId);
             }
 
-            await query;
+            const { data, error } = await query.select('id');
+            if (error) {
+                console.error('[HistoryHandler] Error en setAssignedAgent:', error.message);
+                return false;
+            }
+            if (!data || data.length === 0) {
+                console.warn(`[HistoryHandler] setAssignedAgent no encontro chat para ${chatId} en proyecto ${currentProjectId}, servicio ${currentServiceId}.`);
+                return false;
+            }
 
             // Emitir evento para refrescar la UI en tiempo real
             historyEvents.emit('bot_toggled', {
@@ -1560,8 +1658,10 @@ export class HistoryHandler {
                 assigned_agent: agentName,
                 project_id: currentProjectId
             });
+            return true;
         } catch (err) {
             console.error('[HistoryHandler] Error en setAssignedAgent:', err);
+            return false;
         }
     }
 
@@ -2205,11 +2305,16 @@ export class HistoryHandler {
                     query = query.in('id', matchingChatIds);
                 }
 
-                if (platform === 'leads') {
-                    // Filtramos por chats que tengan algún estado CRM o estén marcados como leads
-                    query = query.or('crm_status.not.is.null,is_lead.eq.true');
-                } else if (platform && platform !== 'all') {
-                    query = query.eq('type', platform);
+                if (platform === 'webchat') {
+                    query = query.eq('type', 'webchat');
+                } else {
+                    query = query.neq('type', 'webchat');
+                    if (platform === 'leads') {
+                        // Filtramos por chats que tengan algun estado CRM o esten marcados como leads
+                        query = query.or('crm_status.not.is.null,is_lead.eq.true');
+                    } else if (platform && platform !== 'all') {
+                        query = query.eq('type', platform);
+                    }
                 }
 
                 // Filtro por asignación (si se solicita)
@@ -2577,44 +2682,103 @@ export class HistoryHandler {
 
 
 
-    static async saveThreadId(chatId: string, threadId: string, forcedProjectId?: string) {
+    static async saveThreadId(chatId: string, threadId: string, forcedProjectId?: string, forcedServiceId?: string | null) {
+        chatId = this.normalizeId(chatId);
         const currentProjectId = forcedProjectId || this.PROJECT_IDENTIFIER;
+        const currentServiceId = forcedServiceId || this.SERVICE_IDENTIFIER;
 
         // Invalidar cache
         this.invalidateChatCache(chatId, currentProjectId);
 
         try {
             // Primero obtenemos metadata actual
-            const { data } = await supabase
+            let selectQuery = supabase
                 .from('chats')
                 .select('metadata')
                 .eq('id', chatId)
-                .eq('project_id', currentProjectId)
-                .maybeSingle();
+                .eq('project_id', currentProjectId);
+            if (currentServiceId) {
+                selectQuery = selectQuery.eq('service_id', currentServiceId);
+            }
+            const { data } = await selectQuery.maybeSingle();
 
             const currentMetadata = data?.metadata || {};
             const updatedMetadata = { ...currentMetadata, thread_id: threadId };
 
-            await supabase
+            let updateQuery = supabase
                 .from('chats')
                 .update({ metadata: updatedMetadata })
                 .eq('id', chatId)
                 .eq('project_id', currentProjectId);
+            if (currentServiceId) {
+                updateQuery = updateQuery.eq('service_id', currentServiceId);
+            }
+            await updateQuery;
         } catch (err) {
             console.error('[HistoryHandler] Error en saveThreadId:', err);
         }
     }
-
     /**
      * Obtiene el thread_id de OpenAI del metadata del chat
      */
-    static async getThreadId(chatId: string, forcedProjectId?: string): Promise<string | null> {
+    static async getThreadId(chatId: string, forcedProjectId?: string, forcedServiceId?: string | null): Promise<string | null> {
         try {
-            const chat = await this.getChat(chatId, forcedProjectId);
+            const chat = await this.getChat(chatId, forcedProjectId, forcedServiceId || undefined);
             return chat?.metadata?.thread_id || null;
         } catch (err) {
             console.error('[HistoryHandler] Error en getThreadId:', err);
             return null;
+        }
+    }
+
+    static async clearThreadId(rawChatId: string, forcedProjectId?: string, forcedServiceId?: string | null): Promise<boolean> {
+        const chatId = this.normalizeId(rawChatId);
+        const currentProjectId = forcedProjectId || this.PROJECT_IDENTIFIER;
+        const currentServiceId = forcedServiceId || this.SERVICE_IDENTIFIER;
+
+        if (process.env.STORAGE_MODE === "local") {
+            const chat = await LocalHistoryStore.getChat(chatId, currentProjectId);
+            if (!chat) return false;
+            const metadata = { ...(chat.metadata || {}) };
+            delete metadata.thread_id;
+            return LocalHistoryStore.updateContactDetails(chatId, { metadata } as any, currentProjectId);
+        }
+
+        try {
+            const chat = await this.getChat(chatId, currentProjectId, currentServiceId || undefined);
+            if (!chat) {
+                console.warn(`[HistoryHandler] clearThreadId no encontro chat para ${chatId} en proyecto ${currentProjectId}, servicio ${currentServiceId}.`);
+                return false;
+            }
+
+            const metadata = { ...(chat.metadata || {}) };
+            delete metadata.thread_id;
+
+            let updateQuery = supabase
+                .from('chats')
+                .update({ metadata })
+                .eq('id', chatId)
+                .eq('project_id', currentProjectId);
+
+            if (currentServiceId && currentServiceId !== 'default' && currentServiceId !== 'default_service') {
+                updateQuery = updateQuery.eq('service_id', currentServiceId);
+            }
+
+            const { data, error } = await updateQuery.select('id');
+            if (error) {
+                console.error('[HistoryHandler] Error en clearThreadId:', error.message);
+                return false;
+            }
+            if (!data || data.length === 0) {
+                console.warn(`[HistoryHandler] clearThreadId no actualizo chat para ${chatId} en proyecto ${currentProjectId}, servicio ${currentServiceId}.`);
+                return false;
+            }
+
+            this.invalidateChatCache(chatId, currentProjectId);
+            return true;
+        } catch (err) {
+            console.error('[HistoryHandler] Error en clearThreadId:', err);
+            return false;
         }
     }
 

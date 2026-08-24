@@ -100,6 +100,11 @@ historyEvents.on('setting_changed', async ({ key, value, projectId, serviceId }:
 
 // Helper to dynamically extract projectId from query, body, or headers
 export const resolveProjectId = (req: any): string | null => {
+    if (req?.auth && !req.auth.isSuperAdmin) {
+        const authProjectId = req.auth.projectId;
+        return authProjectId && authProjectId !== 'default' ? authProjectId : null;
+    }
+
     const pId = req?.query?.projectId || (req?.body && req?.body.projectId) || req?.headers?.['x-project-id'] || (req?.auth && req?.auth.projectId);
     if (pId && pId !== 'default') return pId;
     if (req?.hostInfo) return req.hostInfo.projectId;
@@ -108,6 +113,11 @@ export const resolveProjectId = (req: any): string | null => {
 
 // Helper to dynamically extract serviceId from query, body, or headers
 export const resolveServiceId = (req: any): string | null => {
+    if (req?.auth && !req.auth.isSuperAdmin) {
+        const authServiceId = req.auth.serviceId;
+        return authServiceId && authServiceId !== 'default' ? authServiceId : null;
+    }
+
     const sId = req?.query?.serviceId || (req?.body && req?.body.serviceId) || req?.headers?.['x-service-id'] || (req?.auth && req?.auth.serviceId);
     if (sId && sId !== 'default') return sId;
     if (req?.hostInfo) return req.hostInfo.serviceId;
@@ -892,6 +902,23 @@ export const registerBackofficeRoutes = (app: any) => {
     const adapterProvider = getAdapterProvider();
     const depsHistoryHandler = HistoryHandlerClass;
     const groupProvider = getGroupProvider();
+
+    const resolveOperationalScope = (req: any): { success: true; projectId: string; serviceId: string } | { success: false; status: number; error: string } => {
+        const runtimeProjectId = depsHistoryHandler.PROJECT_IDENTIFIER;
+        const runtimeServiceId = depsHistoryHandler.SERVICE_IDENTIFIER;
+        const requestedProjectId = req?.body?.projectId || req?.query?.projectId;
+        const requestedServiceId = req?.body?.serviceId || req?.query?.serviceId;
+
+        if (requestedProjectId && requestedProjectId !== runtimeProjectId) {
+            return { success: false, status: 403, error: 'Project scope mismatch' };
+        }
+
+        if (requestedServiceId && requestedServiceId !== runtimeServiceId) {
+            return { success: false, status: 403, error: 'Service scope mismatch' };
+        }
+
+        return { success: true, projectId: runtimeProjectId, serviceId: runtimeServiceId };
+    };
 
     // Middleware to dynamically resolve project and service IDs based on hostname
     app.use(async (req: any, res: any, next: any) => {
@@ -2236,16 +2263,20 @@ export const registerBackofficeRoutes = (app: any) => {
     app.post('/api/backoffice/bot-command', backofficeAuth, bodyParser.json(), async (req: any, res: any) => {
         const command = String(req.body?.command || '').trim().toUpperCase();
         const chatId = String(req.body?.chatId || '').trim();
-        const projectId = resolveProjectId(req) || depsHistoryHandler.PROJECT_IDENTIFIER;
-        const serviceId = resolveServiceId(req) || depsHistoryHandler.SERVICE_IDENTIFIER;
+        const scope = resolveOperationalScope(req);
+        if (!scope.success) {
+            return res.status(scope.status).json({ success: false, error: scope.error });
+        }
+        const { projectId, serviceId } = scope;
 
         try {
             if (command === '#ACTUALIZAR#') {
-                await updateMain(projectId, serviceId);
+                const syncResult = await updateMain(projectId, serviceId);
 
                 const { syncAssistantTools } = await import("../../apis/openai/openaiHelper");
                 const assistantKeys = ['ASSISTANT_ID', 'ASSISTANT_1', 'ASSISTANT_2', 'ASSISTANT_3', 'ASSISTANT_4', 'ASSISTANT_5'];
                 const assistantIds = new Set<string>();
+                const errors: string[] = [...(syncResult.errors || [])];
 
                 for (const key of assistantKeys) {
                     const assistantId = await depsHistoryHandler.getConfig(key, projectId, serviceId) || process.env[key];
@@ -2254,11 +2285,35 @@ export const registerBackofficeRoutes = (app: any) => {
                     }
                 }
 
+                let assistantsSynced = 0;
+                let assistantsFailed = 0;
                 for (const assistantId of assistantIds) {
-                    await syncAssistantTools(assistantId, projectId, serviceId);
+                    const ok = await syncAssistantTools(assistantId, projectId, serviceId);
+                    if (ok === true) {
+                        assistantsSynced++;
+                    } else {
+                        assistantsFailed++;
+                        errors.push(`No se pudo sincronizar assistant ${assistantId}`);
+                    }
                 }
 
-                return res.json({ success: true, message: 'Sincronizacion completada.', assistantsSynced: assistantIds.size });
+                const responsePayload = {
+                    success: syncResult.success && assistantsFailed === 0,
+                    partial: !(syncResult.success && assistantsFailed === 0),
+                    message: syncResult.success && assistantsFailed === 0 ? 'Sincronizacion completada.' : 'Sincronizacion parcial.',
+                    sheets: syncResult.sheets,
+                    docs: syncResult.docs,
+                    assistantsAttempted: assistantIds.size,
+                    assistantsSynced,
+                    assistantsFailed,
+                    errors
+                };
+
+                if (responsePayload.success) {
+                    return res.json(responsePayload);
+                }
+
+                return res.status(207).json(responsePayload);
             }
 
             if (!chatId) {
@@ -2266,17 +2321,49 @@ export const registerBackofficeRoutes = (app: any) => {
             }
 
             if (command === '#RESET#') {
-                await depsHistoryHandler.setAssignedAgent(chatId, 'asistente1', projectId, serviceId);
+                const resetOk = await depsHistoryHandler.setAssignedAgent(chatId, 'asistente1', projectId, serviceId);
+                if (!resetOk) {
+                    return res.status(500).json({ success: false, error: 'No se pudo reiniciar el asistente.' });
+                }
                 return res.json({ success: true, message: 'Asistente reiniciado a asistente1.' });
             }
 
             if (command === '#HILO_NUEVO#') {
-                const cleared = await depsHistoryHandler.clearChatHistory(chatId, projectId, serviceId);
-                if (!cleared) {
+                const historyCleared = await depsHistoryHandler.clearChatHistory(chatId, projectId, serviceId);
+                if (!historyCleared) {
                     return res.status(500).json({ success: false, error: 'No se pudo limpiar el historial.' });
                 }
-                await depsHistoryHandler.setAssignedAgent(chatId, 'asistente1', projectId, serviceId);
-                return res.json({ success: true, message: 'Historial borrado y asistente reiniciado.' });
+                const agentReset = await depsHistoryHandler.setAssignedAgent(chatId, 'asistente1', projectId, serviceId);
+                if (!agentReset) {
+                    return res.status(500).json({
+                        success: false,
+                        partial: true,
+                        historyCleared: true,
+                        agentReset: false,
+                        threadCleared: false,
+                        error: 'Historial limpiado, pero no se pudo reiniciar el asistente.'
+                    });
+                }
+
+                const threadCleared = await depsHistoryHandler.clearThreadId(chatId, projectId, serviceId);
+                if (!threadCleared) {
+                    return res.status(500).json({
+                        success: false,
+                        partial: true,
+                        historyCleared: true,
+                        agentReset: true,
+                        threadCleared: false,
+                        error: 'Historial y asistente reiniciados, pero no se pudo limpiar el thread.'
+                    });
+                }
+
+                return res.json({
+                    success: true,
+                    historyCleared: true,
+                    agentReset: true,
+                    threadCleared: true,
+                    message: 'Historial borrado y asistente reiniciado.'
+                });
             }
 
             return res.status(400).json({ success: false, error: 'Comando no soportado.' });

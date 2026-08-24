@@ -10,12 +10,18 @@ const SYNC_INTERVAL_MS = 10 * 60 * 1000; // 10 Minutos
 
 const supabaseUrl = process.env.SUPABASE_URL || vault.supabaseUrl;
 const supabaseKey = process.env.SUPABASE_KEY || vault.supabaseKey;
-const projectId = process.env.RAILWAY_PROJECT_ID || 'local-dev';
+const runtimeProjectId = process.env.PROJECT_ID || process.env.RAILWAY_PROJECT_ID || 'local-dev';
+const projectId = runtimeProjectId;
 // Prioridad: ASSISTANT_NAME (del env), luego BOT_NAME, luego default
 const botName = process.env.ASSISTANT_NAME || process.env.BOT_NAME || 'Unknown Bot';
 
 // Cliente Supabase
 const supabase = createClient(supabaseUrl, supabaseKey);
+
+export interface SessionDeleteResult {
+    success: boolean;
+    error?: string;
+}
 
 /**
  * Restaura la sesión desde Supabase.
@@ -130,53 +136,63 @@ export async function isSessionInDb(sessionId: string = 'default', serviceId: st
 /**
  * Elimina la sesión remota en Supabase.
  */
-export async function deleteSessionFromDb(sessionId: string = 'default', serviceId: string | null = null) {
-    console.log(`[SessionSync] 🗑️ Eliminando sesión remota '${sessionId}' para proyecto '${projectId}' y servicio '${serviceId || 'default'}'...`);
+export async function deleteSessionFromDb(sessionId: string = 'default', serviceId: string | null = null): Promise<SessionDeleteResult> {
+    console.log(`[SessionSync] Eliminando sesion remota '${sessionId}' para proyecto '${runtimeProjectId}' y servicio '${serviceId || 'default'}'...`);
     try {
         let query = supabase
             .from('whatsapp_sessions')
             .delete()
-            .eq('project_id', projectId)
+            .eq('project_id', runtimeProjectId)
             .eq('session_id', sessionId);
 
-        if (serviceId && serviceId !== 'default' && serviceId !== 'default_service') {
+        if (serviceId) {
             query = query.eq('service_id', serviceId);
         }
 
         const { error } = await query;
 
         if (error) {
-            console.error('[SessionSync] ❌ Error eliminando sesión remota:', error);
-        } else {
-            console.log('[SessionSync] ✅ Sesión remota eliminada correctamente.');
+            console.error('[SessionSync] Error eliminando sesion remota:', error);
+            return { success: false, error: error.message };
         }
-    } catch (error) {
-        console.error('[SessionSync] ❌ Error crítico eliminando sesión remota:', error);
+
+        console.log('[SessionSync] Sesion remota eliminada correctamente.');
+        return { success: true };
+    } catch (error: any) {
+        console.error('[SessionSync] Error critico eliminando sesion remota:', error);
+        return { success: false, error: error?.message || String(error) };
     }
 }
-
 /**
  * Elimina todas las sesiones asociadas a este proyecto en Supabase,
  * independientemente de cómo se llame el bot/asistente.
  */
-export async function deleteAllProjectSessionsFromDb() {
-    console.log(`[SessionSync] 🗑️ Eliminando todas las sesiones del proyecto '${projectId}'...`);
+export async function deleteAllProjectSessionsFromDb(serviceId: string | null = null): Promise<SessionDeleteResult> {
+    console.log(`[SessionSync] Eliminando sesiones del proyecto '${runtimeProjectId}'${serviceId ? ` y servicio '${serviceId}'` : ''}...`);
     try {
-        const { error } = await supabase
+        let query = supabase
             .from('whatsapp_sessions')
             .delete()
-            .eq('project_id', projectId);
+            .eq('project_id', runtimeProjectId);
+
+        if (serviceId) {
+            query = query.eq('service_id', serviceId);
+        }
+
+        const { error } = await query;
 
         if (error) {
-            console.error('[SessionSync] ❌ Error eliminando sesiones del proyecto:', error);
-        } else {
-            console.log('[SessionSync] ✅ Todas las sesiones del proyecto eliminadas correctamente.');
+            console.error('[SessionSync] Error eliminando sesiones del proyecto:', error);
+            return { success: false, error: error.message };
         }
-    } catch (error) {
-        console.error('[SessionSync] ❌ Error crítico al eliminar sesiones del proyecto:', error);
+
+        console.log('[SessionSync] Sesiones del proyecto eliminadas correctamente.');
+        return { success: true };
+    } catch (error: any) {
+        console.error('[SessionSync] Error critico al eliminar sesiones del proyecto:', error);
+        return { success: false, error: error?.message || String(error) };
     }
 }
-
 
 /**
  * Inicia la sincronización UNIFICADA.

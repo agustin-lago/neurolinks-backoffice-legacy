@@ -31,6 +31,19 @@ export const registerRailwayRoutes = (app: any, { RailwayApi }: any) => {
         }
     });
 
+    app.post("/api/backoffice/system/restart-runtime", backofficeAuth, async (_req: any, res: any) => {
+        try {
+            const result = await RailwayApi.restartActiveDeployment();
+            if (result.success) {
+                return res.json({ success: true, message: "Reinicio del runtime solicitado correctamente." });
+            }
+
+            return res.status(500).json({ success: false, error: result.error || "No se pudo reiniciar el runtime" });
+        } catch (err: any) {
+            console.error('Error en /api/backoffice/system/restart-runtime:', err);
+            return res.status(500).json({ success: false, error: err.message || "No se pudo reiniciar el runtime" });
+        }
+    });
     app.get("/api/variables", systemConfigAuth, async (req: any, res: any) => {
         try {
             const variables = await RailwayApi.getVariables();

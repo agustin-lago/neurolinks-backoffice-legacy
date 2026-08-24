@@ -429,6 +429,77 @@ const main = async () => {
     registerSafeErrorHandlers();
     // startSessionSync(SESSION_NAME);
 
+    async function clearWhatsappSessionState(options: { allProjectSessions: boolean; serviceId?: string | null }): Promise<{ success: boolean; warnings: string[]; error?: string }> {
+        const warnings: string[] = [];
+        const targetServiceId = options.serviceId || HistoryHandler.SERVICE_IDENTIFIER;
+        const deleteResult = options.allProjectSessions
+            ? await deleteAllProjectSessionsFromDb()
+            : await deleteAllProjectSessionsFromDb(targetServiceId);
+
+        if (!deleteResult.success) {
+            return { success: false, warnings: [], error: deleteResult.error || 'No se pudieron eliminar las sesiones de WhatsApp.' };
+        }
+
+        const providers = [adapterProvider, groupProvider];
+
+        for (const provider of providers) {
+            if (!provider) continue;
+
+            if (provider.constructor.name === 'SupabaseBaileysProvider') {
+                console.log(`[API] Deteniendo proveedor Baileys: ${provider.globalVendorArgs?.name || 'default'}`);
+                provider.preventAutoStart = true;
+
+                if (provider.vendor) {
+                    try {
+                        provider.vendor.ev.removeAllListeners('connection.update');
+                        provider.vendor.ev.removeAllListeners('creds.update');
+                        provider.vendor.end(undefined);
+                    } catch (e: any) {
+                        const warning = `Error cerrando socket de Baileys: ${e.message}`;
+                        warnings.push(warning);
+                        console.warn('[API]', warning);
+                    }
+
+                    provider.vendor = null;
+                }
+
+                provider.initialized = false;
+                provider.qrCodeString = null;
+                provider.pairingCode = null;
+                provider.connectionState = 'close';
+            }
+
+            if (typeof provider.clearMetaCredentials === 'function') {
+                console.log('[API] Invalidando credenciales Meta actuales en memoria...');
+                provider.clearMetaCredentials();
+            }
+        }
+
+        const sessionPath = path.join(process.cwd(), 'bot_sessions');
+        if (fs.existsSync(sessionPath)) {
+            try {
+                fs.rmSync(sessionPath, { recursive: true, force: true });
+                console.log(`[API] Carpeta local de sesiones eliminada.`);
+            } catch (fsErr: any) {
+                const warning = `Error borrando carpeta local bot_sessions: ${fsErr.message}`;
+                warnings.push(warning);
+                console.warn('[API]', warning);
+            }
+        }
+
+        historyEvents.emit('whatsapp_line_changed', {
+            projectId: HistoryHandler.PROJECT_IDENTIFIER,
+            project_id: HistoryHandler.PROJECT_IDENTIFIER,
+            serviceId: targetServiceId,
+            service_id: targetServiceId,
+            provider: 'baileys',
+            active: false,
+            connection: 'close'
+        });
+
+        return { success: true, warnings };
+    }
+
     // 8. Middlewares y Plugins post-Bot
     if (app) {
         // Plugins y Middlewares Globales de Body-Parsing
@@ -530,84 +601,56 @@ const main = async () => {
         // API Session Control
         app.post("/api/delete-session", backofficeAuth, async (_req: any, res: any) => {
             try {
-                console.log(`[API] 🗑️ Petición de eliminación de todas las sesiones para el proyecto`);
-                
-                // 1. Borrar todas las sesiones del proyecto de la base de datos
-                await deleteAllProjectSessionsFromDb();
+                console.log(`[API] Peticion de eliminacion de todas las sesiones para el proyecto`);
+                const result = await clearWhatsappSessionState({ allProjectSessions: true });
 
-                // 2. Detener los proveedores y limpiar su memoria para que no re-guarden
-                // credenciales o sesiones pertenecientes a la configuracion anterior.
-                const providers = [adapterProvider, groupProvider];
-
-                for (const provider of providers) {
-                    if (!provider) continue;
-
-                    // Baileys: detener socket, listeners y cualquier posibilidad de
-                    // re-persistir la sesión anterior.
-                    if (provider.constructor.name === 'SupabaseBaileysProvider') {
-                        console.log(
-                            `[API] Deteniendo proveedor Baileys: ${provider.globalVendorArgs?.name || 'default'}`
-                        );
-
-                        provider.preventAutoStart = true;
-
-                        if (provider.vendor) {
-                            try {
-                                provider.vendor.ev.removeAllListeners('connection.update');
-                                provider.vendor.ev.removeAllListeners('creds.update');
-                                provider.vendor.end(undefined);
-                            } catch (e: any) {
-                                console.warn(
-                                    '[API] Error cerrando socket de Baileys:',
-                                    e.message
-                                );
-                            }
-
-                            provider.vendor = null;
-                        }
-
-                        provider.initialized = false;
-                        provider.qrCodeString = null;
-                        provider.pairingCode = null;
-                        provider.connectionState = 'close';
-                    }
-
-                    // Meta Cloud API: eliminar access_token, phone_number_id y waba_id
-                    // pertenecientes a la configuracion anterior.
-                    if (typeof provider.clearMetaCredentials === 'function') {
-                        console.log(
-                            '[API] Invalidando credenciales Meta actuales en memoria...'
-                        );
-
-                        provider.clearMetaCredentials();
-                    }
+                if (!result.success) {
+                    return res.status(500).json({ success: false, error: result.error, warnings: result.warnings });
                 }
 
-                // 3. Borrar la carpeta local de sesiones para evitar restauraciones automáticas
-                const sessionPath = path.join(process.cwd(), 'bot_sessions');
-                if (fs.existsSync(sessionPath)) {
-                    try {
-                        fs.rmSync(sessionPath, { recursive: true, force: true });
-                        console.log(`[API] ✅ Carpeta local de sesiones eliminada.`);
-                    } catch (fsErr: any) {
-                        console.warn('[API] Error borrando carpeta local bot_sessions:', fsErr.message);
-                    }
-                }
-
-                historyEvents.emit('whatsapp_line_changed', {
-                    projectId: HistoryHandler.PROJECT_IDENTIFIER,
-                    project_id: HistoryHandler.PROJECT_IDENTIFIER,
-                    serviceId: HistoryHandler.SERVICE_IDENTIFIER,
-                    service_id: HistoryHandler.SERVICE_IDENTIFIER,
-                    provider: 'baileys',
-                    active: false,
-                    connection: 'close'
-                });
-
-                res.json({ success: true });
+                return res.json({ success: true, warnings: result.warnings });
             } catch (err: any) {
                 console.error('Error en /api/delete-session:', err);
-                res.status(500).json({ success: false, error: err.message });
+                return res.status(500).json({ success: false, error: err.message });
+            }
+        });
+
+        app.post("/api/backoffice/whatsapp/session-reset", backofficeAuth, async (_req: any, res: any) => {
+            try {
+                const resetResult = await clearWhatsappSessionState({
+                    allProjectSessions: false,
+                    serviceId: HistoryHandler.SERVICE_IDENTIFIER
+                });
+
+                if (!resetResult.success) {
+                    return res.status(500).json({
+                        success: false,
+                        sessionReset: false,
+                        error: resetResult.error,
+                        warnings: resetResult.warnings
+                    });
+                }
+
+                const restartResult = await RailwayApi.restartActiveDeployment();
+                if (!restartResult.success) {
+                    return res.status(500).json({
+                        success: false,
+                        sessionReset: true,
+                        restartRequested: false,
+                        restartWarning: restartResult.error,
+                        warnings: resetResult.warnings
+                    });
+                }
+
+                return res.json({
+                    success: true,
+                    sessionReset: true,
+                    restartRequested: true,
+                    warnings: resetResult.warnings
+                });
+            } catch (err: any) {
+                console.error('Error en /api/backoffice/whatsapp/session-reset:', err);
+                return res.status(500).json({ success: false, sessionReset: false, error: err.message });
             }
         });
     }

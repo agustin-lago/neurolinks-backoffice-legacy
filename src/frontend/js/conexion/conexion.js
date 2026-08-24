@@ -202,11 +202,13 @@ function renderMetaConnectionInfo(metaOnboarding, isPrimaryMeta) {
 
 async function runBotCommand(command, chatId) {
     const token = localStorage.getItem('backoffice_token');
-    const res = await fetch(`/api/backoffice/bot-command?token=${token}`, {
+    const res = await fetch('/api/backoffice/bot-command', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token || ''}`
+        },
         body: JSON.stringify({
-            token,
             command,
             chatId,
             projectId: currentProjectId,
@@ -214,7 +216,7 @@ async function runBotCommand(command, chatId) {
         })
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok || !data.success) throw new Error(data.error || 'No se pudo ejecutar el comando');
+    if (!res.ok) throw new Error(data.error || 'No se pudo ejecutar el comando');
     return data;
 }
 
@@ -387,10 +389,27 @@ async function runBotCommandForSelectedChats(command) {
     if (!chatIds.length) throw new Error('Selecciona al menos un chat.');
 
     const results = [];
+    let succeeded = 0;
+    let failed = 0;
     for (const chatId of chatIds) {
-        results.push(await runBotCommand(command, chatId));
+        try {
+            const data = await runBotCommand(command, chatId);
+            const ok = data.success !== false;
+            if (ok) succeeded++;
+            else failed++;
+            results.push({ chatId, success: ok, data, error: ok ? undefined : (data.error || 'La operacion fallo') });
+        } catch (err) {
+            failed++;
+            results.push({ chatId, success: false, error: err.message || 'La operacion fallo' });
+        }
     }
-    return results;
+    return {
+        success: failed === 0,
+        total: chatIds.length,
+        succeeded,
+        failed,
+        results
+    };
 }
 
 
@@ -774,7 +793,10 @@ window.initConexionView = function () {
             reloadBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Reiniciando...';
             try {
                 const token = localStorage.getItem('backoffice_token');
-                const res = await fetch(`/api/restart-bot?token=${encodeURIComponent(token || '')}`, { method: 'POST' });
+                const res = await fetch('/api/backoffice/system/restart-runtime', {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${token || ''}` }
+                });
                 const data = await res.json().catch(() => ({}));
                 if (!res.ok || data.success === false) throw new Error(data.error || 'Error al solicitar el reinicio');
                 window.swalAlert("Reinicio solicitado", "La pagina se recargara en 10 segundos.", "success");
@@ -793,7 +815,17 @@ window.initConexionView = function () {
             setCommandButtonBusy(syncCommandBtn, true, 'Sincronizando...');
             try {
                 const data = await runBotCommand('#ACTUALIZAR#');
-                window.swalAlert('Sincronizacion completada', `Sheets, RAG y tools actualizados. Asistentes sincronizados: ${data.assistantsSynced || 0}.`, 'success');
+                const sheets = data.sheets || {};
+                const docs = data.docs || {};
+                const summary = `Sheets: ${sheets.succeeded || 0}/${sheets.processed || 0}. Docs: ${docs.succeeded || 0}/${docs.processed || 0}. Asistentes: ${data.assistantsSynced || 0}/${data.assistantsAttempted || 0}.`;
+                if (data.success === true) {
+                    window.swalAlert('Sincronizacion completada', summary, 'success');
+                } else if (data.partial === true) {
+                    const errors = Array.isArray(data.errors) && data.errors.length ? `\n${data.errors.slice(0, 3).join('\n')}` : '';
+                    window.swalAlert('Sincronizacion parcial', `${summary}${errors}`, 'warning');
+                } else {
+                    throw new Error(data.error || 'No se pudo ejecutar #ACTUALIZAR#');
+                }
             } catch (err) {
                 window.swalAlert('Error', err.message || 'No se pudo ejecutar #ACTUALIZAR#', 'error');
             } finally {
@@ -837,8 +869,12 @@ window.initConexionView = function () {
             if (!selectedCount) return window.swalAlert('Falta el contacto', 'Selecciona al menos un chat antes de ejecutar Reset.', 'warning');
             setCommandButtonBusy(resetCommandBtn, true, 'Reiniciando...');
             try {
-                await runBotCommandForSelectedChats('#RESET#');
-                window.swalAlert('Asistente reiniciado', `${selectedCount} chat${selectedCount === 1 ? '' : 's'} vuelto${selectedCount === 1 ? '' : 's'} a asistente1.`, 'success');
+                const batch = await runBotCommandForSelectedChats('#RESET#');
+                if (batch.failed === 0) {
+                    window.swalAlert('Asistente reiniciado', `${batch.succeeded} chat${batch.succeeded === 1 ? '' : 's'} vuelto${batch.succeeded === 1 ? '' : 's'} a asistente1.`, 'success');
+                } else {
+                    window.swalAlert('Reset parcial', `Total: ${batch.total}. Exitosos: ${batch.succeeded}. Fallidos: ${batch.failed}.`, 'warning');
+                }
             } catch (err) {
                 window.swalAlert('Error', err.message || 'No se pudo ejecutar #RESET#', 'error');
             } finally {
@@ -855,8 +891,12 @@ window.initConexionView = function () {
             if (!confirmed) return;
             setCommandButtonBusy(newThreadCommandBtn, true, 'Borrando...');
             try {
-                await runBotCommandForSelectedChats('#HILO_NUEVO#');
-                window.swalAlert('Hilo nuevo iniciado', `Historial eliminado en ${selectedCount} chat${selectedCount === 1 ? '' : 's'}.`, 'success');
+                const batch = await runBotCommandForSelectedChats('#HILO_NUEVO#');
+                if (batch.failed === 0) {
+                    window.swalAlert('Hilo nuevo iniciado', `Historial eliminado en ${batch.succeeded} chat${batch.succeeded === 1 ? '' : 's'}.`, 'success');
+                } else {
+                    window.swalAlert('Hilo nuevo parcial', `Total: ${batch.total}. Exitosos: ${batch.succeeded}. Fallidos: ${batch.failed}.`, 'warning');
+                }
             } catch (err) {
                 window.swalAlert('Error', err.message || 'No se pudo ejecutar #HILO_NUEVO#', 'error');
             } finally {
@@ -879,22 +919,28 @@ window.initConexionView = function () {
             confirmSi.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Reiniciando...';
             try {
                 const token = localStorage.getItem('backoffice_token');
-                const delRes = await fetch(`/api/delete-session?token=${token}`, { method: 'POST' });
-                if (!delRes.ok) throw new Error("Error al borrar la sesión en DB");
-                const restRes = await fetch(`/api/restart-bot?token=${encodeURIComponent(token || '')}`, { method: 'POST' });
-                const restData = await restRes.json().catch(() => ({}));
-                if (!restRes.ok || restData.success === false) throw new Error(restData.error || "Error al solicitar el reinicio del bot");
-                resetModal.innerHTML = `<div class="glass-strong p-8 text-center"><i class="fas fa-check-circle" style="font-size:3rem;color:#25d366;display:block;margin-bottom:20px;"></i><h3 class="text-xl font-heading font-bold mb-3">¡Listo!</h3><p class="text-secondary-content text-sm">El bot se está reiniciando. La página se recargará en 5 segundos.</p></div>`;
+                const res = await fetch('/api/backoffice/whatsapp/session-reset', {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${token || ''}` }
+                });
+                const data = await res.json().catch(() => ({}));
+                if (data.sessionReset === true && data.restartRequested === false) {
+                    resetModal.innerHTML = `<div class="glass-strong p-8 text-center"><i class="fas fa-exclamation-circle" style="font-size:3rem;color:#f59e0b;display:block;margin-bottom:20px;"></i><h3 class="text-xl font-heading font-bold mb-3">Sesion eliminada</h3><p class="text-secondary-content text-sm">La sesion fue eliminada correctamente, pero Railway no pudo reiniciarse automaticamente.</p></div>`;
+                    return;
+                }
+                if (!res.ok || data.success === false || data.sessionReset === false) {
+                    throw new Error(data.error || "Error al reiniciar la sesion");
+                }
+                resetModal.innerHTML = `<div class="glass-strong p-8 text-center"><i class="fas fa-check-circle" style="font-size:3rem;color:#25d366;display:block;margin-bottom:20px;"></i><h3 class="text-xl font-heading font-bold mb-3">Listo</h3><p class="text-secondary-content text-sm">El bot se esta reiniciando. La pagina se recargara en 5 segundos.</p></div>`;
                 setTimeout(() => window.location.reload(), 5000);
             } catch (err) {
                 console.error(err);
                 window.swalAlert("Error", "Hubo un error: " + err.message, "error");
                 confirmSi.disabled = false;
-                confirmSi.innerText = 'SÍ, REINICIAR';
+                confirmSi.innerText = 'SI, REINICIAR';
             }
         });
     }
-
     // --- Modal Desvincular Meta ---
     const goUnlinkBtn = document.getElementById('go-unlink-meta');
     const unlinkModal = document.getElementById('unlinkMetaModal');

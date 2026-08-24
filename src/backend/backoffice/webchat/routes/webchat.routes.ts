@@ -9,8 +9,16 @@ import { transcribeAudioFile } from "../../../apis/openai/audioTranscriptior";
 import { withRetry } from "../../../utils/retryHelper";
 
 const webChatManager = new WebChatManager();
+const WEBCHAT_CLIENT_ID_RE = /^wc_[a-z0-9_-]{8,80}$/i;
 
 function getWebchatClientKey(req: any): string {
+    const bodyClientId = typeof req.body?.clientId === 'string' ? req.body.clientId : '';
+    const queryClientId = typeof req.query?.clientId === 'string' ? req.query.clientId : '';
+    const clientId = (bodyClientId || queryClientId).trim();
+    if (WEBCHAT_CLIENT_ID_RE.test(clientId)) {
+        return clientId;
+    }
+
     let ip = '';
     const xff = req.headers['x-forwarded-for'];
     if (typeof xff === 'string') {
@@ -38,16 +46,18 @@ export const registerWebchatRoutes = (app: any) => {
 
             if (command === 'RESET' || command === '#RESET#') {
                 session.thread_id = null;
+                (session as any).assignedAgent = 'asistente1';
                 await HistoryHandler.setAssignedAgent(ip, 'asistente1', projectId, serviceId || undefined);
-                await HistoryHandler.saveThreadId(ip, '', projectId);
+                await HistoryHandler.saveThreadId(ip, '', projectId, serviceId || undefined);
                 return res.json({ success: true, command: 'RESET', message: 'Reset aplicado solo al webchat.' });
             }
 
             if (command === 'HILO_NUEVO' || command === '#HILO_NUEVO#') {
                 session.clear();
+                (session as any).assignedAgent = 'asistente1';
                 await HistoryHandler.clearChatHistory(ip, projectId, serviceId || undefined);
                 await HistoryHandler.setAssignedAgent(ip, 'asistente1', projectId, serviceId || undefined);
-                await HistoryHandler.saveThreadId(ip, '', projectId);
+                await HistoryHandler.saveThreadId(ip, '', projectId, serviceId || undefined);
                 return res.json({ success: true, command: 'HILO_NUEVO', clearChat: true, message: 'Hilo nuevo iniciado solo para el webchat.' });
             }
 
@@ -58,6 +68,7 @@ export const registerWebchatRoutes = (app: any) => {
                         delete session[k];
                     }
                 }
+                await HistoryHandler.clearClientContext(ip, projectId, serviceId || undefined);
                 return res.json({ success: true, command: 'CLEAR_CONTEXT', message: 'Contexto de cliente eliminado de la sesión del webchat.' });
             }
 
@@ -151,6 +162,8 @@ export const registerWebchatRoutes = (app: any) => {
             }
 
             const { HistoryHandler } = await import("../../../db/historyHandler");
+            const projectId = String(req.body?.projectId || req.query?.projectId || process.env.RAILWAY_PROJECT_ID || HistoryHandler.PROJECT_IDENTIFIER || '').trim();
+            const serviceId = String(req.body?.serviceId || req.query?.serviceId || process.env.RAILWAY_SERVICE_ID || HistoryHandler.SERVICE_IDENTIFIER || '').trim();
             const session = webChatManager.getSession(ip);
             let replyText = '';
 
@@ -169,7 +182,9 @@ export const registerWebchatRoutes = (app: any) => {
                     'Webchat User',
                     ip,
                     null,
-                    'whatsapp'
+                    'webchat',
+                    projectId,
+                    serviceId || undefined
                 );
 
                 // Estado compatible con safeToAsk
@@ -190,10 +205,9 @@ export const registerWebchatRoutes = (app: any) => {
                     clear: async () => session.clear(),
                 };
 
-                const projectId = process.env.RAILWAY_PROJECT_ID || '';
-                const assigned: string = (await HistoryHandler.getAssignedAgent(ip, projectId)) as string || 'asistente1';
+                const assigned = ((session as any).assignedAgent || (await HistoryHandler.getAssignedAgent(ip, projectId, serviceId || undefined)) || 'asistente1') as string;
                 const assistantMap = await aiManagerInstance.getAssistantMap(projectId);
-                const currentAssistantId = await aiManagerInstance.getAssignedAssistantId(ip, projectId);
+                const currentAssistantId = assistantMap[assigned] || await aiManagerInstance.getAssignedAssistantId(ip, projectId);
                 
                 // Función adaptadora para recursión en AssistantResponseProcessor
                 const webChatAdapterFn = async (
@@ -210,7 +224,7 @@ export const registerWebchatRoutes = (app: any) => {
                     if (msg.toLowerCase() === '#reset#') {
                         console.log(`[Webchat] 🔄 Reset solicitado para: ${uid}`);
                         await state.update({ thread_id: null });
-                        await HistoryHandler.saveThreadId(uid, ''); // Limpiar en DB
+                        await HistoryHandler.saveThreadId(uid, '', projId || projectId, serviceId || undefined); // Limpiar en DB
                         return res.json({ response: "🔄 Sesión reiniciada. ¿En qué puedo ayudarte?" });
                     }
 
@@ -226,7 +240,8 @@ export const registerWebchatRoutes = (app: any) => {
                             true, 
                             projId || projectId,
                             true,
-                            agentName
+                            agentName,
+                            serviceId || null
                         );
                         return response;
                     } catch (e) {
@@ -235,7 +250,7 @@ export const registerWebchatRoutes = (app: any) => {
                     }
                 };
 
-                const reply = await safeToAsk(currentAssistantId, message, state, ip, undefined, 5, true, projectId, true, assigned);
+                const reply = await safeToAsk(currentAssistantId, message, state, ip, undefined, 5, true, projectId, true, assigned, serviceId || null);
 
                 const flowDynamic = async (arr: any) => {
                     const text = Array.isArray(arr) ? arr.map(a => a.body).join('\n') : arr;
@@ -244,7 +259,7 @@ export const registerWebchatRoutes = (app: any) => {
 
                 await AssistantResponseProcessor.procesarHandoverYDerivacion(
                     reply as string,
-                    { type: 'webchat', from: ip, thread_id: session.thread_id, body: message },
+                    { type: 'webchat', platform: 'webchat', from: ip, userId: ip, thread_id: session.thread_id, body: message },
                     flowDynamic,
                     state,
                     undefined,
@@ -253,7 +268,8 @@ export const registerWebchatRoutes = (app: any) => {
                     currentAssistantId,
                     assigned,
                     assistantMap,
-                    projectId
+                    projectId,
+                    serviceId || null
                 );
                 session.addAssistantMessage(replyText);
             }

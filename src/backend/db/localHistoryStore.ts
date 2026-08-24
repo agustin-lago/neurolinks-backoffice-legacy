@@ -298,6 +298,8 @@ export class LocalHistoryStore {
         // Filter by platform
         if (platform && platform !== "all") {
             chats = chats.filter(c => c.type === platform);
+        } else {
+            chats = chats.filter(c => c.type !== 'webchat');
         }
 
         // Filter by search text

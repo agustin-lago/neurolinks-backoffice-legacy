@@ -285,7 +285,7 @@ export const askWithFunctions = async (assistantId: string, message: string, sta
         if (state && typeof state.get === 'function') {
             preContextData = state.get('datosClienteContext') || {};
         }
-        const dbContext = await HistoryHandler.getClientContext(userId);
+        const dbContext = await HistoryHandler.getClientContext(userId, targetProjectId, chatServiceId);
         if (dbContext) {
             preContextData = {
                 ...dbContext,

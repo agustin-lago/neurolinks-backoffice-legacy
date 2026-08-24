@@ -8,16 +8,36 @@ import { indexDocumentForRAG } from "../../rag/ragService.js";
 
 dotenv.config();
 
+export interface SyncResult {
+    success: boolean;
+    processed: number;
+    succeeded: number;
+    failed: number;
+    skipped: number;
+    errors: string[];
+}
+
+const createSyncResult = (): SyncResult => ({
+    success: true,
+    processed: 0,
+    succeeded: 0,
+    failed: 0,
+    skipped: 0,
+    errors: []
+});
+
 const getDriveClient = () => {
     const auth = createGoogleAuth(["https://www.googleapis.com/auth/drive.readonly"]);
     return google.drive({ version: "v3", auth });
 };
 
-export async function updateAllDocs(projectId?: string, serviceId?: string) {
+export async function updateAllDocs(projectId?: string, serviceId?: string): Promise<SyncResult> {
+    const result = createSyncResult();
     const supabase = HistoryHandler.getSupabase();
     if (!supabase) {
-        console.log("⚠️ [GoogleDocs] Supabase no disponible para actualizar documentos.");
-        return;
+        const error = "[GoogleDocs] Supabase no disponible para actualizar documentos.";
+        console.log(error);
+        return { ...result, success: false, failed: 1, errors: [error] };
     }
 
     try {
@@ -26,15 +46,23 @@ export async function updateAllDocs(projectId?: string, serviceId?: string) {
         let query = supabase.from("settings").select("project_id, service_id, value").eq("key", "DOCX_ID_UPDATE");
 
         if (currentProjectId && !['default_project', 'default', 'test-hugo-local', 'local-dev'].includes(currentProjectId)) {
-            console.log(`📌 [GoogleDocs] Sincronizando documentos exclusivamente para el proyecto activo: ${currentProjectId}`);
+            console.log(`[GoogleDocs] Sincronizando documentos exclusivamente para el proyecto activo: ${currentProjectId}`);
             query = query.eq("project_id", currentProjectId);
-            
+
             if (currentServiceId && !['default_service', 'generic', 'null'].includes(currentServiceId)) {
                 query = query.eq("service_id", currentServiceId);
             }
         }
 
-        const { data: docSettings } = await query;
+        const { data: docSettings, error: settingsError } = await query;
+        if (settingsError) {
+            return {
+                ...result,
+                success: false,
+                failed: 1,
+                errors: [`[GoogleDocs] Error consultando settings: ${settingsError.message}`]
+            };
+        }
 
         const envDocx = process.env.DOCX_ID_UPDATE || "";
         const docTasks: Array<{ projectId: string; serviceId: string | null; docxId: string }> = [];
@@ -60,24 +88,36 @@ export async function updateAllDocs(projectId?: string, serviceId?: string) {
         }
 
         if (docTasks.length === 0) {
-            console.log("ℹ️ [GoogleDocs] No hay IDs de documentos para procesar.");
-            return;
+            console.log("[GoogleDocs] No hay IDs de documentos para procesar.");
+            return result;
         }
 
-        console.log(`📡 [GoogleDocs] Procesando ${docTasks.length} documentos para RAG en Supabase...`);
+        console.log(`[GoogleDocs] Procesando ${docTasks.length} documentos para RAG en Supabase...`);
 
         for (const task of docTasks) {
-            await processDocById(task.projectId, task.docxId, task.serviceId || undefined);
+            result.processed++;
+            const ok = await processDocById(task.projectId, task.docxId, task.serviceId || undefined);
+            if (ok) {
+                result.succeeded++;
+            } else {
+                result.failed++;
+                result.errors.push(`[GoogleDocs] No se pudo procesar documento ${task.docxId}`);
+            }
         }
+
+        result.success = result.failed === 0;
+        return result;
     } catch (err: any) {
-        console.error("❌ [GoogleDocs] Error en updateAllDocs:", err?.message || err);
+        const message = err?.message || String(err);
+        console.error("[GoogleDocs] Error en updateAllDocs:", message);
+        return { ...result, success: false, failed: result.failed + 1, errors: [...result.errors, message] };
     }
 }
 
 async function processDocById(projectId: string, DOCX_FILE_ID: string, serviceId?: string) {
     const drive = getDriveClient();
     try {
-        if (!DOCX_FILE_ID) throw new Error("No se definió DOCX_FILE_ID");
+        if (!DOCX_FILE_ID) throw new Error("No se definio DOCX_FILE_ID");
 
         const meta = await drive.files.get({ fileId: DOCX_FILE_ID, fields: "name, mimeType" });
         const fileName = meta.data.name || `archivo_${Date.now()}.docx`;
@@ -101,7 +141,7 @@ async function processDocById(projectId: string, DOCX_FILE_ID: string, serviceId
                     .pipe(dest);
             });
             downloaded = true;
-            console.log(`✅ [GoogleDocs] Archivo descargado: ${tempDocxPath}`);
+            console.log(`[GoogleDocs] Archivo descargado: ${tempDocxPath}`);
         } catch (err: any) {
             if (err?.response?.data?.error?.reason === "fileNotDownloadable" || /fileNotDownloadable/.test(err?.message || "")) {
                 console.log("[GoogleDocs] Exportando Google Doc nativo como .docx...");
@@ -117,7 +157,7 @@ async function processDocById(projectId: string, DOCX_FILE_ID: string, serviceId
                         .pipe(dest);
                 });
                 downloaded = true;
-                console.log(`✅ [GoogleDocs] Google Doc exportado como .docx: ${tempDocxPath}`);
+                console.log(`[GoogleDocs] Google Doc exportado como .docx: ${tempDocxPath}`);
             } else {
                 throw err;
             }
@@ -125,17 +165,16 @@ async function processDocById(projectId: string, DOCX_FILE_ID: string, serviceId
 
         if (!downloaded) throw new Error("No se pudo descargar ni exportar el documento.");
 
-        // Indexar documento para RAG en Supabase
         const indexOk = await indexDocumentForRAG(projectId, DOCX_FILE_ID, fileName, tempDocxPath, serviceId);
 
         deleteTemporaryDocx(tempDocxPath);
 
         if (indexOk) {
-            console.log(`🎉 [GoogleDocs] Documento "${fileName}" (ID: ${DOCX_FILE_ID}) sincronizado con éxito en RAG Supabase.`);
+            console.log(`[GoogleDocs] Documento "${fileName}" (ID: ${DOCX_FILE_ID}) sincronizado con exito en RAG Supabase.`);
         }
         return indexOk;
     } catch (error: any) {
-        console.error(`❌ [GoogleDocs] Error procesando documento ID ${DOCX_FILE_ID}:`, error?.message || error);
+        console.error(`[GoogleDocs] Error procesando documento ID ${DOCX_FILE_ID}:`, error?.message || error);
         return false;
     }
 }
@@ -146,6 +185,6 @@ function deleteTemporaryDocx(tempPath: string) {
             fs.unlinkSync(tempPath);
         }
     } catch (error: any) {
-        console.error("❌ Error eliminando archivo temporal:", error.message);
+        console.error("Error eliminando archivo temporal:", error.message);
     }
 }

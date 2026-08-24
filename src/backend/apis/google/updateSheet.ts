@@ -18,6 +18,32 @@ const supabase = (supabaseUrl && supabaseKey) ? createClient(supabaseUrl, supaba
 
 let currentFileId: string | null = null;
 
+export interface SyncResult {
+    success: boolean;
+    processed: number;
+    succeeded: number;
+    failed: number;
+    skipped: number;
+    errors: string[];
+}
+
+interface SheetProcessResult {
+    success: boolean;
+    skipped?: boolean;
+    tableName?: string;
+    error?: string;
+}
+
+const createSheetSyncResult = (): SyncResult & { tables: string[] } => ({
+    success: true,
+    processed: 0,
+    succeeded: 0,
+    failed: 0,
+    skipped: 0,
+    errors: [],
+    tables: []
+});
+
 
 import { createGoogleAuth } from "./googleAuth";
 import { getOpenAIBaseUrl } from "../openai/openaiHelper";
@@ -41,11 +67,13 @@ const getOpenAIClient = async (projectId?: string, serviceId?: string) => {
 };
 
 
-// Función principal para procesar todos los sheets
-export async function updateAllSheets(options: { forceRecreate?: boolean; projectId?: string; serviceId?: string; skipDb?: boolean } = {}) {
+// Funcion principal para procesar todos los sheets
+export async function updateAllSheets(options: { forceRecreate?: boolean; projectId?: string; serviceId?: string; skipDb?: boolean } = {}): Promise<SyncResult & { tables: string[] }> {
+    const result = createSheetSyncResult();
     if (!supabase) {
-        console.log("⚠️ [GoogleSheets] Supabase no disponible para actualizar sheets.");
-        return;
+        const error = "[GoogleSheets] Supabase no disponible para actualizar sheets.";
+        console.log(error);
+        return { ...result, success: false, failed: 1, errors: [error] };
     }
 
     try {
@@ -55,16 +83,18 @@ export async function updateAllSheets(options: { forceRecreate?: boolean; projec
         let query = supabase.from("settings").select("project_id, service_id, value").eq("key", "SHEET_ID_UPDATE");
 
         if (currentProjectId && !['default_project', 'default', 'test-hugo-local', 'local-dev'].includes(currentProjectId)) {
-            console.log(`📌 [GoogleSheets] Sincronizando sheets para el proyecto activo: ${currentProjectId}`);
+            console.log(`[GoogleSheets] Sincronizando sheets para el proyecto activo: ${currentProjectId}`);
             query = query.eq("project_id", currentProjectId);
-            
+
             if (currentServiceId && !['default_service', 'generic', 'null'].includes(currentServiceId)) {
                 query = query.eq("service_id", currentServiceId);
             }
         }
 
         const { data: sheetSettings, error } = await query;
-        if (error) throw error;
+        if (error) {
+            return { ...result, success: false, failed: 1, errors: [`[GoogleSheets] Error consultando settings: ${error.message}`] };
+        }
 
         const sheetTasks: Array<{ projectId: string; serviceId: string | null; sheetId: string }> = [];
 
@@ -79,7 +109,6 @@ export async function updateAllSheets(options: { forceRecreate?: boolean; projec
             }
         }
 
-        // Fallback env
         const envSheet = process.env.SHEET_ID_UPDATE || "";
         if (envSheet && envSheet !== "default" && envSheet !== "PENDING") {
             const ids = envSheet.split(",").map((id: string) => id.trim()).filter(Boolean);
@@ -90,39 +119,55 @@ export async function updateAllSheets(options: { forceRecreate?: boolean; projec
             }
         }
 
-        const tableNames: string[] = [];
+        const processedSheets: Array<{ task: { projectId: string; serviceId: string | null; sheetId: string }; tableName: string }> = [];
+
         for (const task of sheetTasks) {
-            const tableName = await processSheetById(task.sheetId, task.projectId, task.serviceId || undefined, options);
-            if (tableName) {
-                tableNames.push(tableName);
+            result.processed++;
+            const sheetResult = await processSheetById(task.sheetId, task.projectId, task.serviceId || undefined, options);
+            if (sheetResult.success && sheetResult.skipped) {
+                result.skipped++;
+                continue;
             }
+            if (sheetResult.success && sheetResult.tableName) {
+                result.succeeded++;
+                result.tables.push(sheetResult.tableName);
+                processedSheets.push({ task, tableName: sheetResult.tableName });
+                continue;
+            }
+
+            result.failed++;
+            result.errors.push(sheetResult.error || `[GoogleSheets] No se pudo procesar sheet ${task.sheetId}`);
         }
 
-        // Al finalizar, actualizar automáticamente las habilidades del bot agrupando por proyecto/servicio
-        if (tableNames.length > 0) {
+        if (processedSheets.length > 0) {
             const tasksByProject = new Map<string, { serviceId?: string, tables: string[] }>();
-            for (let i = 0; i < sheetTasks.length; i++) {
-                const task = sheetTasks[i];
-                const tableName = tableNames[i];
-                if (tableName) {
-                    const key = `${task.projectId}:${task.serviceId || 'default'}`;
-                    if (!tasksByProject.has(key)) {
-                        tasksByProject.set(key, { serviceId: task.serviceId || undefined, tables: [] });
-                    }
-                    tasksByProject.get(key)!.tables.push(tableName);
+            for (const processed of processedSheets) {
+                const key = `${processed.task.projectId}:${processed.task.serviceId || 'default'}`;
+                if (!tasksByProject.has(key)) {
+                    tasksByProject.set(key, { serviceId: processed.task.serviceId || undefined, tables: [] });
                 }
+                tasksByProject.get(key)!.tables.push(processed.tableName);
             }
 
             for (const [projKey, val] of tasksByProject.entries()) {
                 const [projId] = projKey.split(':');
-                await autoUpdateBotAbilities(val.tables, projId, val.serviceId);
+                try {
+                    await autoUpdateBotAbilities(val.tables, projId, val.serviceId);
+                } catch (err: any) {
+                    result.failed++;
+                    result.errors.push(`[GoogleSheets] Error actualizando herramientas para ${projId}: ${err?.message || err}`);
+                }
             }
         }
+
+        result.success = result.failed === 0;
+        return result;
     } catch (err: any) {
-        console.error("❌ [GoogleSheets] Error en updateAllSheets:", err?.message || err);
+        const message = err?.message || String(err);
+        console.error("[GoogleSheets] Error en updateAllSheets:", message);
+        return { ...result, success: false, failed: result.failed + 1, errors: [...result.errors, message] };
     }
 }
-
 // Helper function to sanitize valid table name with project prefix
 const sanitizeTableName = (name: string, _projectId?: string) => {
     return name.toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/^_+|_+$/g, '');
@@ -189,33 +234,25 @@ async function ensureTableExists(tableName: string, headers: string[]) {
 }
 
 // Procesa un sheet por ID, obtiene el nombre real y ejecuta la lógica
-async function processSheetById(SHEET_ID: string, projectId: string, serviceId: string | undefined, options: { forceRecreate?: boolean; skipDb?: boolean } = {}) {
+async function processSheetById(SHEET_ID: string, projectId: string, serviceId: string | undefined, options: { forceRecreate?: boolean; skipDb?: boolean } = {}): Promise<SheetProcessResult> {
     const sheets = getSheetsClient();
     try {
-        // Obtener metadatos para el nombre real de la hoja principal
         const meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
-
         const sheetTitle = meta.data.sheets?.[0]?.properties?.title || "Sheet1";
         const SHEET_NAME = sheetTitle;
         const tableName = sanitizeTableName(SHEET_NAME, projectId);
         const TXT_PATH = path.join("temp", `${SHEET_NAME}.json`);
 
-        console.log(`📌 Obteniendo datos de Google Sheets: ${SHEET_ID} (${SHEET_NAME})`);
+        console.log(`Obteniendo datos de Google Sheets: ${SHEET_ID} (${SHEET_NAME})`);
 
-        // Paso 1: Obtener un rango grande para detectar la última fila y columna con datos
         const initialRange = `${SHEET_NAME}!A1:ZZ10000`;
-        const response = await sheets.spreadsheets.values.get({
-            spreadsheetId: SHEET_ID,
-            range: initialRange,
-        });
-
+        const response = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: initialRange });
         const rows = response.data.values;
         if (!rows || rows.length === 0) {
-            console.warn("⚠️ No se encontraron datos en la hoja de cálculo.");
-            return null;
+            console.warn("No se encontraron datos en la hoja de calculo.");
+            return { success: true, skipped: true };
         }
 
-        // Calcular última fila y columna con datos reales
         let lastRow = rows.length;
         let lastCol = 0;
         for (let i = 0; i < rows.length; i++) {
@@ -228,7 +265,6 @@ async function processSheetById(SHEET_ID: string, projectId: string, serviceId: 
         }
         if (lastCol === 0) lastCol = 1;
 
-        // Convertir número de columna a letra
         const colToLetter = (col: number) => {
             let temp = "";
             let n = col;
@@ -239,160 +275,130 @@ async function processSheetById(SHEET_ID: string, projectId: string, serviceId: 
             }
             return temp;
         };
-        const lastColLetter = colToLetter(lastCol);
-        const dynamicRange = `${SHEET_NAME}!A1:${lastColLetter}${lastRow}`;
 
-        // Volver a pedir los datos usando el rango exacto
-        const fullResponse = await sheets.spreadsheets.values.get({
-            spreadsheetId: SHEET_ID,
-            range: dynamicRange,
-        });
+        const dynamicRange = `${SHEET_NAME}!A1:${colToLetter(lastCol)}${lastRow}`;
+        const fullResponse = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: dynamicRange });
         const fullRows = fullResponse.data.values;
         if (!fullRows || fullRows.length === 0) {
-            console.warn("⚠️ No se encontraron datos en el rango calculado.");
-            return null;
+            console.warn("No se encontraron datos en el rango calculado.");
+            return { success: true, skipped: true };
         }
-        // Validar headers
+
         const rawHeaders = fullRows[0].map((h: string) => (h || "").trim());
         const activeColumns = rawHeaders
-            .map((h, idx) => ({
-                original: h,
-                sanitized: sanitizeColumnName(h),
-                idx
-            }))
+            .map((h, idx) => ({ original: h, sanitized: sanitizeColumnName(h), idx }))
             .filter(col => col.sanitized.length > 0);
 
         if (activeColumns.length === 0) {
-            console.warn("⚠️ La primera fila no contiene encabezados válidos.");
-            return null;
+            console.warn("La primera fila no contiene encabezados validos.");
+            return { success: true, skipped: true };
         }
 
-        // Formatear los datos obtenidos de forma flexible, convirtiendo valores numéricos
         const formattedData = fullRows.slice(1)
             .filter(row => row && row.length > 0 && row.some(cell => (cell || "").trim() !== ""))
             .map((row) => {
                 const obj: Record<string, any> = {};
                 activeColumns.forEach(col => {
-                    // Obtener valor crudo. Google Sheets ya devuelve números como números si el formato de celda es automático.
-                    let cellValue = row[col.idx];
-                    
-                    if (cellValue === undefined || cellValue === null) {
-                        cellValue = "";
-                    }
-
-                    // Si es string, solo hacemos trim.
-                    if (typeof cellValue === "string") {
-                         obj[col.original] = cellValue.trim();
-                    } else {
-                         // Si es número u otro tipo, lo guardamos tal cual
-                         obj[col.original] = cellValue;
-                    }
+                    const cellValue = row[col.idx];
+                    obj[col.original] = typeof cellValue === "string" ? cellValue.trim() : (cellValue ?? "");
                 });
                 return obj;
             });
 
-        // Verificar que la carpeta "temp" exista
+        if (formattedData.length === 0) {
+            console.warn("La hoja solo contiene encabezados o filas vacias.");
+            return { success: true, skipped: true };
+        }
+
         const dirPath = path.join("temp");
         if (!fs.existsSync(dirPath)) {
             fs.mkdirSync(dirPath, { recursive: true });
         }
 
-        // Guardar los datos en un archivo de texto en formato JSON simple
-        const jsonData = JSON.stringify(formattedData, null, 2);
-        fs.writeFileSync(TXT_PATH, jsonData, "utf8");
-        console.log(`📂 Datos guardados en archivo de texto: ${TXT_PATH}`);
+        fs.writeFileSync(TXT_PATH, JSON.stringify(formattedData, null, 2), "utf8");
+        console.log(`Datos guardados en archivo de texto: ${TXT_PATH}`);
 
-        // --- SUPABASE INTEGRATION START ---
         if (supabase && !options.skipDb) {
             const headersSanitized = activeColumns.map(col => col.sanitized);
-            
+
             if (options.forceRecreate) {
-                console.log(`⚠️ Forzando recreación de tabla '${tableName}' (DROP TABLE)...`);
+                console.log(`Forzando recreacion de tabla '${tableName}' (DROP TABLE)...`);
                 const dropRes = await supabase.rpc('exec_sql', { query: `DROP TABLE IF EXISTS ${tableName}` });
                 if (dropRes.error) {
-                    console.error(`❌ Error al eliminar tabla '${tableName}':`, dropRes.error);
-                } else {
-                    console.log(`✅ Tabla '${tableName}' eliminada para recreación.`);
+                    console.error(`Error al eliminar tabla '${tableName}':`, dropRes.error);
+                    return { success: false, tableName, error: dropRes.error.message };
                 }
             }
 
-            // Ensure table exists
             const tableReady = await ensureTableExists(tableName, headersSanitized);
-            
-            if (tableReady) {
-                // Map data to sanitized keys
-                const supabaseData = formattedData.map(row => {
-                    const newRow: any = {};
-                    activeColumns.forEach(col => {
-                        newRow[col.sanitized] = row[col.original];
-                    });
-                    return newRow;
-                });
-                
-                // Limpieza previa: Truncar para reemplazo total
-                const truncateRes = await supabase.rpc('exec_sql', { query: `TRUNCATE TABLE ${tableName}` });
-                
-                if (truncateRes.error) {
-                     // Fallback a DELETE estándar si RPC falla (o no existe)
-                     // console.warn(`[Supabase] Script exec_sql falló, usando DELETE ALL convencional...`);
-                     const { error: delErr } = await supabase.from(tableName).delete().not('id', 'is', null);
-                     if (delErr) console.error(`[Supabase] Error limpiando tabla:`, delErr.message);
-                } else {
-                     console.log(`[Supabase] 🧹 Tabla '${tableName}' truncada correctamente.`);
-                }
-
-                // Insertar nuevos datos (Insert es más rápido que Upsert en tabla vacía)
-                const { error } = await supabase.from(tableName).insert(supabaseData);
-                if (error) {
-                    console.error(`❌ Error uploading to Supabase table '${tableName}':`, error.message);
-                    
-                    // Si el error es por columnas diferentes o no existentes (ej. code 42703 o palabra 'column')
-                    if (error.code === '42703' || (error.message && error.message.toLowerCase().includes('column'))) {
-                        console.log(`⚠️ Detectado conflicto de esquema (columnas diferentes o no existentes) en '${tableName}'. Recreando tabla...`);
-                        
-                        // 1. Eliminar la tabla existente
-                        const dropRes = await supabase.rpc('exec_sql', { query: `DROP TABLE IF EXISTS ${tableName}` });
-                        if (dropRes.error) {
-                            console.error(`❌ Error al eliminar tabla '${tableName}' durante la recuperación:`, dropRes.error);
-                        } else {
-                            console.log(`✅ Tabla '${tableName}' eliminada para recuperación.`);
-                            
-                            // 2. Recrear la tabla con las columnas actualizadas
-                            const tableRecreated = await ensureTableExists(tableName, headersSanitized);
-                            if (tableRecreated) {
-                                // 3. Reintentar la inserción de datos
-                                console.log(`🚀 Reintentando inserción en tabla recreada '${tableName}'...`);
-                                const retryRes = await supabase.from(tableName).insert(supabaseData);
-                                if (retryRes.error) {
-                                    console.error(`❌ Error en el reintento de carga para '${tableName}':`, retryRes.error.message);
-                                } else {
-                                    console.log(`✅ Datos cargados exitosamente tras recrear la tabla '${tableName}'.`);
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    console.log(`✅ Datos cargados exitosamente en Supabase tabla '${tableName}'.`);
-                }
+            if (!tableReady) {
+                return { success: false, tableName, error: `No se pudo crear o verificar la tabla ${tableName}` };
             }
-        } else {
-             console.warn("⚠️ No se encontraron credenciales de Supabase (SUPABASE_URL, SUPABASE_KEY). Saltando integración.");
-        }
-        // --- SUPABASE INTEGRATION END ---
 
-        // Enviar el archivo de texto al vector store
+            const supabaseData = formattedData.map(row => {
+                const newRow: any = {};
+                activeColumns.forEach(col => {
+                    newRow[col.sanitized] = row[col.original];
+                });
+                return newRow;
+            });
+
+            const truncateRes = await supabase.rpc('exec_sql', { query: `TRUNCATE TABLE ${tableName}` });
+            if (truncateRes.error) {
+                const { error: delErr } = await supabase.from(tableName).delete().not('id', 'is', null);
+                if (delErr) {
+                    console.error(`[Supabase] Error limpiando tabla:`, delErr.message);
+                    return { success: false, tableName, error: delErr.message };
+                }
+            } else {
+                console.log(`[Supabase] Tabla '${tableName}' truncada correctamente.`);
+            }
+
+            const insertRes = await supabase.from(tableName).insert(supabaseData);
+            if (insertRes.error) {
+                console.error(`Error uploading to Supabase table '${tableName}':`, insertRes.error.message);
+
+                if (insertRes.error.code === '42703' || (insertRes.error.message && insertRes.error.message.toLowerCase().includes('column'))) {
+                    console.log(`Detectado conflicto de esquema en '${tableName}'. Recreando tabla...`);
+                    const dropRes = await supabase.rpc('exec_sql', { query: `DROP TABLE IF EXISTS ${tableName}` });
+                    if (dropRes.error) {
+                        console.error(`Error al eliminar tabla '${tableName}' durante la recuperacion:`, dropRes.error);
+                        return { success: false, tableName, error: dropRes.error.message };
+                    }
+
+                    const tableRecreated = await ensureTableExists(tableName, headersSanitized);
+                    if (!tableRecreated) {
+                        return { success: false, tableName, error: `No se pudo recrear la tabla ${tableName}` };
+                    }
+
+                    const retryRes = await supabase.from(tableName).insert(supabaseData);
+                    if (retryRes.error) {
+                        console.error(`Error en el reintento de carga para '${tableName}':`, retryRes.error.message);
+                        return { success: false, tableName, error: retryRes.error.message };
+                    }
+
+                    console.log(`Datos cargados exitosamente tras recrear la tabla '${tableName}'.`);
+                } else {
+                    return { success: false, tableName, error: insertRes.error.message };
+                }
+            } else {
+                console.log(`Datos cargados exitosamente en Supabase tabla '${tableName}'.`);
+            }
+        } else if (!options.skipDb) {
+            return { success: false, tableName, error: "No se encontraron credenciales de Supabase." };
+        }
+
         const success = await uploadDataToAssistant(TXT_PATH, SHEET_ID, projectId, serviceId);
         if (!success) {
-            console.error("❌ Error al enviar los datos al vector store.");
+            return { success: false, tableName, error: `Error al enviar los datos del sheet ${SHEET_ID} al vector store.` };
         }
 
-        return tableName;
+        return { success: true, tableName };
     } catch (error: any) {
-        console.error("❌ Error al obtener datos:", error.message);
-        return null;
+        console.error("Error al obtener datos:", error.message);
+        return { success: false, error: error?.message || String(error) };
     }
 }
-
 // Función para subir datos al vector store de OpenAI
 export async function uploadDataToAssistant(filePath: string, stateId: string, projectId?: string, serviceId?: string) {
     const openai = await getOpenAIClient(projectId, serviceId);

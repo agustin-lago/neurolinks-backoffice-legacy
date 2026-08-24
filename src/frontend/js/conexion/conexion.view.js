@@ -118,7 +118,7 @@ window.conexionView = {
                                 <div class="conexion-action-row">
                                     <div>
                                         <div class="conexion-action-title">Recargar motor del bot</div>
-                                        <div class="conexion-action-desc">Aplica cambios de Meta o Google Sheets sin entrar a Railway.</div>
+                                        <div class="conexion-action-desc">Reinicia el runtime y aplica cambios sin borrar las sesiones de WhatsApp.</div>
                                     </div>
                                     <button id="system-reload-btn" class="btn-primary flex-shrink-0 self-end sm:self-center">
                                         <i class="fas fa-sync-alt"></i> Reiniciar
@@ -216,7 +216,7 @@ window.conexionView = {
             <div class="glass-strong w-full max-w-sm mx-4 p-8 text-center animate-pop-in">
                 <i class="fas fa-exclamation-triangle text-4xl text-red-400 mb-5 block"></i>
                 <h3 class="text-xl font-heading font-bold text-red-400 mb-3">Estas seguro?</h3>
-                <p class="info-text text-sm mb-6">Se borraran las credenciales actuales y el bot se reiniciara completamente. Tendras que escanear el QR de nuevo.</p>
+                <p class="info-text text-sm mb-6">Se borrara la sesion de WhatsApp correspondiente a este servicio y el bot se reiniciara. Sera necesario volver a vincular Baileys cuando corresponda.</p>
                 <div class="flex gap-3 justify-center">
                     <button id="confirmNo" class="btn-outline px-5 py-2.5 text-sm">Cancelar</button>
                     <button id="confirmSi" class="btn btn-danger px-5 py-2.5 text-sm">

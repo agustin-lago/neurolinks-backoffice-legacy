@@ -130,7 +130,12 @@ window.initWebchatView = function () {
         fetch(`/webchat-api?token=${token}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: msg, clientId: webchatClientId })
+            body: JSON.stringify({
+                message: msg,
+                projectId: window.railwayProjectId || '',
+                serviceId: window.railwayServiceId || '',
+                clientId: webchatClientId
+            })
         }).then(r => {
             if (r.status === 401) { logout(); return null; }
             return r.json();
@@ -145,7 +150,13 @@ window.initWebchatView = function () {
         fetch(`/webchat-api?token=${token}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: '', file: { base64, name: filename, mime: mimeType, type }, clientId: webchatClientId })
+            body: JSON.stringify({
+                message: '',
+                file: { base64, name: filename, mime: mimeType, type },
+                projectId: window.railwayProjectId || '',
+                serviceId: window.railwayServiceId || '',
+                clientId: webchatClientId
+            })
         }).then(r => r.json())
           .then(d => { if (d?.reply) _addMsg(d.reply, 'assistant'); })
           .catch(() => _addMsg('Error enviando archivo.', 'assistant'));
