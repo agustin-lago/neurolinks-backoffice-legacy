@@ -243,6 +243,51 @@ const isMetaProvider = (provider: any): boolean => {
     return typeof provider.getTemplates === 'function' || typeof provider.sendTemplate === 'function';
 };
 
+type CrossServiceOutboundResult =
+    | { success: true }
+    | { success: false; status: number; error: string };
+
+const validateCrossServiceOutbound = async (
+    projectId: string,
+    targetServiceId: string,
+    provider: any,
+    isGroup: boolean = false
+): Promise<CrossServiceOutboundResult> => {
+    const runtimeServiceId = HistoryHandlerClass.SERVICE_IDENTIFIER;
+    if (!targetServiceId || targetServiceId === runtimeServiceId) {
+        return { success: true };
+    }
+
+    if (isGroup) {
+        return {
+            success: false,
+            status: 409,
+            error: 'El envío cross-service a grupos no está disponible desde este runtime.'
+        };
+    }
+
+    if (!isMetaProvider(provider)) {
+        return {
+            success: false,
+            status: 409,
+            error: 'Esta línea utiliza un provider ligado a otro runtime. Abrí el servicio correspondiente para enviar el mensaje.'
+        };
+    }
+
+    const onboarding = await HistoryHandlerClass.getMetaOnboardingData(projectId, false, targetServiceId);
+    const targetToken = onboarding?.whatsappToken || onboarding?.access_token;
+    const targetPhoneId = onboarding?.whatsappNumberId || onboarding?.phoneNumberId || onboarding?.phone_number_id;
+
+    if (!targetToken || !targetPhoneId || targetToken === 'PENDING' || targetPhoneId === 'PENDING') {
+        return {
+            success: false,
+            status: 409,
+            error: 'El servicio seleccionado no tiene credenciales Meta válidas para realizar el envío desde este runtime.'
+        };
+    }
+
+    return { success: true };
+};
 const getStoredRawPayload = (messageData: any): any => {
     return messageData?.raw_payload || messageData?.rawPayload || null;
 };
@@ -398,6 +443,10 @@ export const processSendMessage = async (
         try {
             const isGroup = chatId.includes('@g.us');
             const providerToSend = (isGroup && groupProvider) ? groupProvider : adapterProvider;
+            const outboundValidation = await validateCrossServiceOutbound(currentProjectId, targetServiceId, providerToSend, isGroup);
+            if (!outboundValidation.success) {
+                return res.status(outboundValidation.status).json({ success: false, error: outboundValidation.error });
+            }
             if (replyTo) {
                 if (process.env.STORAGE_MODE === "local") {
                     const { LocalHistoryStore } = await import('../../db/localHistoryStore');
@@ -505,6 +554,9 @@ export const processSendMessage = async (
                 }
             }
 
+            if (providerResponse == null) {
+                return res.status(502).json({ success: false, error: 'El provider no confirmó el envío del mensaje.' });
+            }
             // 5. GUARDAR EN HISTORIAL (Ahora con ID para evitar duplicados con el ECHO)
             // Builderbot/Baileys retorna el objeto mensaje, Meta retorna un objeto con { messages: [ { id: ... } ] }
             const externalId = providerResponse?.key?.id || providerResponse?.messages?.[0]?.id || providerResponse?.id;
@@ -2118,18 +2170,20 @@ export const registerBackofficeRoutes = (app: any) => {
         try {
             const isGroup = chatId.includes('@g.us');
             const providerToSend = (isGroup && groupProvider) ? groupProvider : adapterProvider;
-            const currentProjectId = resolveProjectId(req) || HistoryHandlerClass.PROJECT_IDENTIFIER;
-            let targetServiceId = resolveServiceId(req) || depsHistoryHandler.SERVICE_IDENTIFIER;
-            if ((!targetServiceId || targetServiceId === 'default' || targetServiceId === 'default_service') && chatId) {
-                const chatObj = await depsHistoryHandler.getChat(chatId.split('@')[0], currentProjectId);
-                if (chatObj?.service_id) targetServiceId = chatObj.service_id;
+            const scope = await resolveAuthorizedDataScope(req, depsHistoryHandler);
+            if (!scope.success) {
+                const failedScope = scope as { success: false; status: number; error: string };
+                return res.status(failedScope.status).json({ success: false, error: failedScope.error });
             }
-
-
+            const { projectId: currentProjectId, serviceId: targetServiceId } = scope;
             if (!providerToSend) {
                 return res.status(503).json({ success: false, error: 'WhatsApp provider not initialized' });
             }
 
+            const outboundValidation = await validateCrossServiceOutbound(currentProjectId, targetServiceId, providerToSend, isGroup);
+            if (!outboundValidation.success) {
+                return res.status(outboundValidation.status).json({ success: false, error: outboundValidation.error });
+            }
             console.log(`[FORWARD] Reenviando media a ${chatId}. URL: ${mediaUrl}, Tipo: ${mediaType}`);
 
             const jid = chatId.includes('@') ? chatId : `${chatId}@s.whatsapp.net`;
@@ -2213,6 +2267,9 @@ export const registerBackofficeRoutes = (app: any) => {
                 }
             }
 
+            if (providerResponse == null) {
+                return res.status(502).json({ success: false, error: 'El provider no confirmó el envío del mensaje.' });
+            }
             // Guardar en el historial
             const externalId = providerResponse?.key?.id || providerResponse?.messages?.[0]?.id || providerResponse?.id;
 
@@ -3230,9 +3287,16 @@ export const registerBackofficeRoutes = (app: any) => {
     });
 
     app.post('/api/backoffice/whatsapp/send-single-template', backofficeAuth, bodyParser.json(), async (req: any, res: any) => {
-        const projectId = resolveProjectId(req);
-        const serviceId = resolveServiceId(req);
-        await syncMetaProvider(projectId, serviceId);
+        const scope = await resolveAuthorizedDataScope(req, depsHistoryHandler);
+        if (!scope.success) {
+            const failedScope = scope as { success: false; status: number; error: string };
+            return res.status(failedScope.status).json({ success: false, error: failedScope.error });
+        }
+        const { projectId, serviceId } = scope;
+        const runtimeServiceId = depsHistoryHandler.SERVICE_IDENTIFIER;
+        if (serviceId === runtimeServiceId) {
+            await syncMetaProvider(projectId, serviceId);
+        }
         const { chatId, phone, templateName, languageCode, components, renderedText, mediaHeader } = req.body;
 
         try {
@@ -3254,13 +3318,17 @@ export const registerBackofficeRoutes = (app: any) => {
                 return res.status(400).json({ success: false, error: 'El proveedor WhatsApp configurado no soporta plantillas de Meta.' });
             }
 
-            const templates = await provider.getTemplates();
+            const outboundValidation = await validateCrossServiceOutbound(projectId, serviceId, provider, false);
+            if (!outboundValidation.success) {
+                return res.status(outboundValidation.status).json({ success: false, error: outboundValidation.error });
+            }
+            const templates = serviceId === runtimeServiceId ? await provider.getTemplates() : [];
             const template = templates?.find((t: any) => t.name === templateName);
-            if (!template) {
+            if (serviceId === runtimeServiceId && !template) {
                 return res.status(404).json({ success: false, error: `La plantilla '${templateName}' no existe o no fue encontrada.` });
             }
 
-            const lang = languageCode || template.language || 'es';
+            const lang = languageCode || template?.language || 'es';
             console.log(`¡ [SINGLE-TEMPLATE] Enviando plantilla '${templateName}' (${lang}) a ${targetPhone}...`);
 
             // Procesar componentes (en especial cabeceras multimedia) para subir directamente a Meta
@@ -3356,7 +3424,7 @@ export const registerBackofficeRoutes = (app: any) => {
                                 } catch (downloadErr: any) {
                                     console.error(`❌ [SINGLE-TEMPLATE] Error procesando multimedia de cabecera:`, downloadErr.message);
                                     // Fallback: Si el link falló y la plantilla original de Meta define header_handle
-                                    const headerCompDef = template.components?.find((c: any) => c.type === 'HEADER');
+                                    const headerCompDef = template?.components?.find((c: any) => c.type === 'HEADER');
                                     const rawHandle = headerCompDef?.example?.header_handle?.[0];
                                     if (rawHandle) {
                                         delete param[formatType].link;

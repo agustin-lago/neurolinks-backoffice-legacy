@@ -4538,6 +4538,9 @@ async function executeForward(targetChatId) {
 
     console.log(`Reenviando media a ${targetChatId}...`);
 
+    const targetChat = chats.find(chat => chat.id === targetChatId);
+    const targetProjectId = targetChat?.project_id || window.railwayProjectId || '';
+    const targetServiceId = targetChat?.service_id || window.railwayServiceId || '';
     try {
         const res = await fetch(`/api/backoffice/forward-message?token=${token}`, {
             method: 'POST',
@@ -4547,7 +4550,9 @@ async function executeForward(targetChatId) {
             body: JSON.stringify({
                 chatId: targetChatId,
                 mediaUrl: forwardMediaUrl,
-                mediaType: forwardMediaType
+                mediaType: forwardMediaType,
+                projectId: targetProjectId,
+                serviceId: targetServiceId
             })
         });
 

@@ -373,9 +373,12 @@ class MetaCloudProvider extends ProviderClass {
         let waba_id = this.config.waba_id || this.config.businessId;
         let targetProjectId = options?.projectId || null;
         let targetServiceId = options?.serviceId || null;
+        const explicitlyRequestedServiceId = targetServiceId || null;
+        let runtimeServiceId: string | null = null;
 
         try {
             const { HistoryHandler } = await import('../db/historyHandler');
+            runtimeServiceId = HistoryHandler.SERVICE_IDENTIFIER;
             targetProjectId = targetProjectId || HistoryHandler.PROJECT_IDENTIFIER;
 
             if (!targetServiceId && number) {
@@ -395,18 +398,37 @@ class MetaCloudProvider extends ProviderClass {
                 }
             }
 
+            const isExplicitCrossService = Boolean(
+                explicitlyRequestedServiceId &&
+                explicitlyRequestedServiceId !== runtimeServiceId &&
+                explicitlyRequestedServiceId !== 'default' &&
+                explicitlyRequestedServiceId !== 'default_service'
+            );
             const canUseServiceConfig = targetServiceId && targetServiceId !== 'default' && targetServiceId !== 'default_service';
+            let serviceConfigResolved = false;
+
             if (canUseServiceConfig) {
                 const serviceOnboarding = await HistoryHandler.getMetaOnboardingData(targetProjectId, false, targetServiceId);
                 const serviceToken = serviceOnboarding?.whatsappToken || serviceOnboarding?.access_token;
-                const servicePhoneId = serviceOnboarding?.phoneNumberId || serviceOnboarding?.whatsappNumberId || serviceOnboarding?.phone_number_id;
+                const servicePhoneId = serviceOnboarding?.whatsappNumberId || serviceOnboarding?.phoneNumberId || serviceOnboarding?.phone_number_id;
                 const serviceWabaId = serviceOnboarding?.whatsappBusinessId || serviceOnboarding?.waba_id;
 
                 if (serviceToken && servicePhoneId && serviceToken !== 'PENDING' && servicePhoneId !== 'PENDING') {
                     access_token = serviceToken;
                     phone_number_id = servicePhoneId;
                     waba_id = serviceWabaId || waba_id;
+                    serviceConfigResolved = true;
                 }
+            }
+
+            if (isExplicitCrossService && !serviceConfigResolved) {
+                return {
+                    phone_number_id: null,
+                    access_token: null,
+                    waba_id: null,
+                    projectId: targetProjectId,
+                    serviceId: targetServiceId
+                };
             }
 
             return {
@@ -414,10 +436,28 @@ class MetaCloudProvider extends ProviderClass {
                 access_token,
                 waba_id,
                 projectId: targetProjectId,
-                serviceId: targetServiceId || HistoryHandler.SERVICE_IDENTIFIER
+                serviceId: targetServiceId || runtimeServiceId
             };
         } catch (e: any) {
             console.error('[MetaCloudProvider] Error resolviendo credenciales dinamicas:', e.message);
+            const isExplicitCrossService = Boolean(
+                runtimeServiceId &&
+                explicitlyRequestedServiceId &&
+                explicitlyRequestedServiceId !== runtimeServiceId &&
+                explicitlyRequestedServiceId !== 'default' &&
+                explicitlyRequestedServiceId !== 'default_service'
+            );
+
+            if (isExplicitCrossService) {
+                return {
+                    phone_number_id: null,
+                    access_token: null,
+                    waba_id: null,
+                    projectId: targetProjectId,
+                    serviceId: targetServiceId
+                };
+            }
+
             return {
                 phone_number_id,
                 access_token,
@@ -427,7 +467,6 @@ class MetaCloudProvider extends ProviderClass {
             };
         }
     }
-
     public async sendTemplate(number: string, templateName: string, languageCode: string = 'es', components: any[] = [], options: any = {}): Promise<any> {
         const sendConfig = await this.resolveProjectServiceSendConfig(number, options);
         const { phone_number_id, access_token } = sendConfig;
