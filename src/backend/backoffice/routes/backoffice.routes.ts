@@ -2872,23 +2872,27 @@ export const registerBackofficeRoutes = (app: any) => {
 
     app.get('/api/backoffice/whatsapp/templates', backofficeAuth, async (req: any, res: any) => {
         try {
-            const projectId = resolveProjectId(req);
-            const serviceId = resolveServiceId(req);
-            
-            let wabaId = null;
-            let token = null;
-
+            const scope = await resolveAuthorizedDataScope(req, depsHistoryHandler);
+            if (!scope.success) {
+                const failedScope = scope as { success: false; status: number; error: string };
+                return res.status(failedScope.status).json({ success: false, error: failedScope.error });
+            }
+            const { projectId, serviceId } = scope;
+            const runtimeServiceId = depsHistoryHandler.SERVICE_IDENTIFIER;
             const activeAdapter = getAdapterProvider();
             const activeGroup = getGroupProvider();
             const provider = isMetaProvider(activeAdapter) ? activeAdapter : activeGroup;
-            if (isMetaProvider(provider)) {
-                wabaId = provider.config.waba_id;
-                token = provider.config.access_token;
-            } else {
-                const config = await depsHistoryHandler.getMetaOnboardingData(projectId || process.env.RAILWAY_PROJECT_ID, false, serviceId);
-                if (config) {
-                    wabaId = config.whatsappBusinessId || config.waba_id;
-                    token = config.whatsappToken || config.access_token;
+
+            const onboarding = await depsHistoryHandler.getMetaOnboardingData(projectId, false, serviceId);
+            let wabaId = onboarding?.whatsappBusinessId || onboarding?.waba_id || null;
+            let token = onboarding?.whatsappToken || onboarding?.access_token || null;
+
+            if (serviceId === runtimeServiceId) {
+                if (!wabaId || wabaId === 'PENDING') {
+                    wabaId = provider?.config?.waba_id || provider?.config?.businessId || null;
+                }
+                if (!token || token === 'PENDING') {
+                    token = provider?.config?.access_token || provider?.config?.jwtToken || null;
                 }
             }
 
@@ -3322,6 +3326,17 @@ export const registerBackofficeRoutes = (app: any) => {
             if (!outboundValidation.success) {
                 return res.status(outboundValidation.status).json({ success: false, error: outboundValidation.error });
             }
+            const targetOnboarding = await depsHistoryHandler.getMetaOnboardingData(projectId, false, serviceId);
+            let targetAccessToken = targetOnboarding?.whatsappToken || targetOnboarding?.access_token || null;
+            let targetPhoneId = targetOnboarding?.whatsappNumberId || targetOnboarding?.phoneNumberId || targetOnboarding?.phone_number_id || null;
+            if (serviceId === runtimeServiceId) {
+                if (!targetAccessToken || targetAccessToken === 'PENDING') {
+                    targetAccessToken = provider?.config?.access_token || provider?.config?.jwtToken || null;
+                }
+                if (!targetPhoneId || targetPhoneId === 'PENDING') {
+                    targetPhoneId = provider?.config?.phone_number_id || provider?.config?.numberId || null;
+                }
+            }
             const templates = serviceId === runtimeServiceId ? await provider.getTemplates() : [];
             const template = templates?.find((t: any) => t.name === templateName);
             if (serviceId === runtimeServiceId && !template) {
@@ -3356,7 +3371,7 @@ export const registerBackofficeRoutes = (app: any) => {
                                         }
                                     }
 
-                                    const accessToken = provider.config?.access_token || '';
+                                    const accessToken = targetAccessToken || '';
                                     const downloadHeaders: any = {
                                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/120.0.0.0 Safari/120.0.0.0',
                                         'Accept': '*/*'
@@ -3399,7 +3414,10 @@ export const registerBackofficeRoutes = (app: any) => {
                                     // 1. Intentar subir directamente a Meta Cloud API para obtener media_id
                                     let uploadedMediaId: string | null = null;
                                     if (typeof (provider as any).uploadMedia === 'function') {
-                                        uploadedMediaId = await (provider as any).uploadMedia(downloadedPath);
+                                        uploadedMediaId = await (provider as any).uploadMedia(downloadedPath, undefined, undefined, {
+                                            phone_number_id: targetPhoneId,
+                                            access_token: targetAccessToken
+                                        });
                                     }
 
                                     if (uploadedMediaId) {

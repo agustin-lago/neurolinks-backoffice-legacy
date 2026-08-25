@@ -374,11 +374,11 @@ class MetaCloudProvider extends ProviderClass {
         let targetProjectId = options?.projectId || null;
         let targetServiceId = options?.serviceId || null;
         const explicitlyRequestedServiceId = targetServiceId || null;
-        let runtimeServiceId: string | null = null;
+        let runtimeServiceId: string | null = process.env.SERVICE_ID || process.env.RAILWAY_SERVICE_ID || null;
 
         try {
             const { HistoryHandler } = await import('../db/historyHandler');
-            runtimeServiceId = HistoryHandler.SERVICE_IDENTIFIER;
+            runtimeServiceId = HistoryHandler.SERVICE_IDENTIFIER || runtimeServiceId;
             targetProjectId = targetProjectId || HistoryHandler.PROJECT_IDENTIFIER;
 
             if (!targetServiceId && number) {
@@ -441,11 +441,10 @@ class MetaCloudProvider extends ProviderClass {
         } catch (e: any) {
             console.error('[MetaCloudProvider] Error resolviendo credenciales dinamicas:', e.message);
             const isExplicitCrossService = Boolean(
-                runtimeServiceId &&
                 explicitlyRequestedServiceId &&
-                explicitlyRequestedServiceId !== runtimeServiceId &&
                 explicitlyRequestedServiceId !== 'default' &&
-                explicitlyRequestedServiceId !== 'default_service'
+                explicitlyRequestedServiceId !== 'default_service' &&
+                (!runtimeServiceId || explicitlyRequestedServiceId !== runtimeServiceId)
             );
 
             if (isExplicitCrossService) {
