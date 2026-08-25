@@ -233,6 +233,51 @@ function setCommandButtonBusy(button, isBusy, busyText) {
     }
 }
 
+function getFriendlySyncError(error) {
+    const message = String(error || '').trim();
+    if (!message) return '';
+
+    const normalized = message.toLowerCase();
+    if (normalized.includes('invalid input syntax for type uuid')) {
+        return 'No se pudieron cargar los datos de un Sheet porque una columna reservada fue interpretada como un campo interno. Volve a sincronizar con la correccion aplicada.';
+    }
+    if (normalized.includes('vector store')) {
+        return 'No se pudo actualizar la base de conocimiento del asistente.';
+    }
+    if (normalized.includes('openai') || normalized.includes('assistant')) {
+        return 'No se pudo sincronizar uno de los asistentes.';
+    }
+    if (normalized.includes('sheet') || normalized.includes('google')) {
+        return 'No se pudo leer o cargar uno de los Sheets configurados.';
+    }
+    if (normalized.includes('supabase') || normalized.includes('database') || normalized.includes('tabla')) {
+        return 'No se pudo actualizar la base de datos.';
+    }
+
+    return 'No se pudo completar una parte de la sincronizacion. Revisa el log tecnico si el problema se repite.';
+}
+
+function buildSyncCommandMessage(data, includeDetails) {
+    const sheets = data.sheets || {};
+    const docs = data.docs || {};
+    const lines = [
+        `Sheets actualizados: ${sheets.succeeded || 0} de ${sheets.processed || 0}`,
+        `Documentos actualizados: ${docs.succeeded || 0} de ${docs.processed || 0}`,
+        `Asistentes sincronizados: ${data.assistantsSynced || 0} de ${data.assistantsAttempted || 0}`
+    ];
+
+    if (includeDetails) {
+        const details = Array.isArray(data.errors)
+            ? data.errors.map(getFriendlySyncError).filter(Boolean)
+            : [];
+        if (details.length) {
+            lines.push('', 'Detalle:', ...details.slice(0, 3).map(detail => `- ${detail}`));
+        }
+    }
+
+    return lines.join('\n');
+}
+
 const commandChatSelectorState = {
     chats: [],
     selected: new Set(),
@@ -815,19 +860,15 @@ window.initConexionView = function () {
             setCommandButtonBusy(syncCommandBtn, true, 'Sincronizando...');
             try {
                 const data = await runBotCommand('#ACTUALIZAR#');
-                const sheets = data.sheets || {};
-                const docs = data.docs || {};
-                const summary = `Sheets: ${sheets.succeeded || 0}/${sheets.processed || 0}. Docs: ${docs.succeeded || 0}/${docs.processed || 0}. Asistentes: ${data.assistantsSynced || 0}/${data.assistantsAttempted || 0}.`;
                 if (data.success === true) {
-                    window.swalAlert('Sincronizacion completada', summary, 'success');
+                    window.swalAlert('Sincronizacion completada', buildSyncCommandMessage(data, false), 'success');
                 } else if (data.partial === true) {
-                    const errors = Array.isArray(data.errors) && data.errors.length ? `\n${data.errors.slice(0, 3).join('\n')}` : '';
-                    window.swalAlert('Sincronizacion parcial', `${summary}${errors}`, 'warning');
+                    window.swalAlert('Sincronizacion parcial', buildSyncCommandMessage(data, true), 'warning');
                 } else {
                     throw new Error(data.error || 'No se pudo ejecutar #ACTUALIZAR#');
                 }
             } catch (err) {
-                window.swalAlert('Error', err.message || 'No se pudo ejecutar #ACTUALIZAR#', 'error');
+                window.swalAlert('Error', getFriendlySyncError(err.message) || 'No se pudo ejecutar #ACTUALIZAR#', 'error');
             } finally {
                 setCommandButtonBusy(syncCommandBtn, false);
             }

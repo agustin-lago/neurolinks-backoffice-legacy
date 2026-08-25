@@ -179,12 +179,18 @@ const sanitizeTableName = (name: string, _projectId?: string) => {
 };
 
 // Helper function to sanitize column names
+const RESERVED_COLUMN_NAMES: Record<string, string> = {
+    id: 'id_',
+    created_at: 'created_at_'
+};
+
 const sanitizeColumnName = (name: string) => {
-    const sanitized = name.toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/^_+|_+$/g, '');
-    let finalName = sanitized;
-    if (finalName === 'id') finalName = 'id_';
-    else if (finalName === 'created_at') finalName = 'created_at_';
-    return finalName.substring(0, 63).replace(/_+$/, '');
+    const sanitized = name.toLowerCase()
+        .replace(/[^a-z0-9_]/g, '_')
+        .replace(/^_+|_+$/g, '')
+        .substring(0, 63)
+        .replace(/_+$/, '');
+    return RESERVED_COLUMN_NAMES[sanitized] || sanitized;
 };
 
 async function ensureTableExists(tableName: string, headers: string[]) {
