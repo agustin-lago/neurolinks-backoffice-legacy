@@ -278,6 +278,19 @@ function buildSyncCommandMessage(data, includeDetails) {
     return lines.join('\n');
 }
 
+function showSyncCommandAlert(title, message, icon) {
+    if (typeof window.Swal !== 'undefined') {
+        return window.Swal.fire({
+            title: title || 'Atencion',
+            html: `<pre style="white-space:pre-line;text-align:center;font-family:inherit;line-height:1.55;margin:0;color:#4b5563;">${escapeCommandHtml(message || '')}</pre>`,
+            icon: icon || 'info',
+            confirmButtonColor: '#0099FF'
+        });
+    }
+    if (typeof window.swalAlert === 'function') return window.swalAlert(title, message, icon);
+    return alert(message || title);
+}
+
 const commandChatSelectorState = {
     chats: [],
     selected: new Set(),
@@ -861,14 +874,14 @@ window.initConexionView = function () {
             try {
                 const data = await runBotCommand('#ACTUALIZAR#');
                 if (data.success === true) {
-                    window.swalAlert('Sincronizacion completada', buildSyncCommandMessage(data, false), 'success');
+                    showSyncCommandAlert('Sincronizacion completada', buildSyncCommandMessage(data, false), 'success');
                 } else if (data.partial === true) {
-                    window.swalAlert('Sincronizacion parcial', buildSyncCommandMessage(data, true), 'warning');
+                    showSyncCommandAlert('Sincronizacion parcial', buildSyncCommandMessage(data, true), 'warning');
                 } else {
                     throw new Error(data.error || 'No se pudo ejecutar #ACTUALIZAR#');
                 }
             } catch (err) {
-                window.swalAlert('Error', getFriendlySyncError(err.message) || 'No se pudo ejecutar #ACTUALIZAR#', 'error');
+                showSyncCommandAlert('Error', getFriendlySyncError(err.message) || 'No se pudo ejecutar #ACTUALIZAR#', 'error');
             } finally {
                 setCommandButtonBusy(syncCommandBtn, false);
             }
