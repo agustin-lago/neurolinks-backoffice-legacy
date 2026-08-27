@@ -45,6 +45,7 @@ scripts/
 !scripts/
 scripts/*
 !scripts/compose-tailwind-input.mjs
+!scripts/setup-github-verified-commits.ps1
 sessions/
 src/scratch/
 temp/
